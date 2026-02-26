@@ -35,6 +35,13 @@ The current CF CLI plugin interface suffers from several critical issues that ha
 10. **Independent migration burden.** Plugin developers have had to independently discover how to update their plugins for CLI V7, V8, and V9 compatibility without guidance.
 11. **Inconsistent UX.** Each plugin implements its own option parsing, leading to inconsistencies between plugins and increased maintenance overhead.
 
+### Help System Limitations
+
+12. **No per-plugin help.** `cf help <plugin-name>` does not work — the CLI only resolves command names and aliases. Users must run `cf plugins` to discover which plugin provides which command.
+13. **Plugin commands are not grouped by plugin.** In `cf help -a`, all plugin commands are listed in a single flat alphabetical list under "INSTALLED PLUGIN COMMANDS:" with no indication of their source plugin.
+14. **Limited help metadata.** The plugin `Command` struct supports only a single-line `HelpText` and a flag-name-to-description map. Built-in commands display examples, related commands, environment variables, and structured flag information through Go struct tags — capabilities unavailable to plugins.
+15. **Minimal flag metadata.** `UsageDetails.Options` is `map[string]string` — plugins cannot specify flag default values, argument types, or whether a flag is required.
+
 ### Evidence from Active Plugin Maintainers
 
 A survey of six actively maintained CF CLI plugins reveals that the community has already organically converged on the minimal integration pattern this RFC formalizes. Every plugin uses the CLI primarily as an identity and context provider, not as a domain proxy.
@@ -228,10 +235,99 @@ Plugin versions MUST follow [Semantic Versioning 2.0.0](https://semver.org/). Th
 
 #### Improved Help Integration
 
-The CLI SHOULD support:
-- Viewing help for a single installed plugin: `cf help <plugin-name>`
-- Grouping plugin commands separately in `cf help` output
-- Long-form descriptions in command help beyond the current single-line `HelpText`
+##### Current State
+
+The current help system has several limitations identified through code analysis of the CLI's `command/common/help_command.go` and related files:
+
+1. **No per-plugin help.** `cf help <plugin-name>` does not work. The help system only resolves command names and aliases, not plugin names. Users must run `cf plugins` to see which plugin provides which command.
+
+2. **Plugin commands are not grouped by plugin.** In `cf help -a`, all plugin commands appear in a single flat list under "INSTALLED PLUGIN COMMANDS:" sorted alphabetically. There is no indication of which plugin provides which command.
+
+3. **Limited metadata in help output.** The current `Command` struct supports only `Name`, `Alias`, `HelpText` (single-line), and `UsageDetails` (usage string + flag name-to-description map). Built-in commands display examples, related commands, and environment variables through Go struct tags — capabilities unavailable to plugins.
+
+4. **Minimal flag metadata.** `UsageDetails.Options` is `map[string]string` — flag name to description only. There is no way for plugins to specify default values, whether a flag takes an argument, or whether it is required.
+
+5. **`cf help` common view shows no descriptions.** Plugin commands appear as a 3-column table of names and aliases only — the `HelpText` is not shown. Users must run `cf help -a` or `cf help <command>` to see descriptions.
+
+##### Proposed Improvements
+
+The CLI SHOULD implement the following improvements:
+
+**1. Per-plugin help: `cf help <plugin-name>`**
+
+When a user runs `cf help <plugin-name>`, the CLI SHOULD display all commands from that plugin:
+
+```
+PLUGIN:
+   OCFScheduler v1.2.3
+
+COMMANDS:
+   create-job             Create a job                     [Aliases: cj]
+   delete-job             Delete a job                     [Aliases: dj]
+   schedule-job           Schedule a job
+   jobs                   List all jobs
+
+Use 'cf help <command>' for details on a specific command.
+```
+
+This requires modifying the CLI's `findPlugin()` method to also match against `PluginMetadata.Name`, not just command names and aliases.
+
+**2. Group plugin commands by plugin in `cf help -a`**
+
+Instead of a flat list, the CLI SHOULD group commands by their providing plugin:
+
+```
+INSTALLED PLUGIN COMMANDS:
+  OCFScheduler v1.2.3:
+     create-job           Create a job
+     jobs                 List all jobs
+     schedule-job         Schedule a job
+
+  AutoScaler v4.1.1:
+     autoscaling-api      Set or view AutoScaler API endpoint
+     autoscaling-policy   Retrieve the scaling policy of an app
+```
+
+**3. Enriched `Command` struct**
+
+The `Command` struct SHOULD be extended with optional fields for richer help:
+
+```go
+type Command struct {
+    Name         string
+    Alias        string
+    HelpText     string     // Short one-line description (existing)
+    Description  string     // Long-form description (new, optional)
+    Examples     string     // Usage examples (new, optional)
+    RelatedCmds  []string   // "See also" commands (new, optional)
+    UsageDetails Usage
+}
+```
+
+When a plugin provides `Examples`, `cf help <command>` SHOULD display them in an EXAMPLES section, matching the format used for built-in commands. These fields are optional — existing plugins that do not set them continue to work without changes.
+
+**4. Enriched flag metadata (optional)**
+
+For plugins that want richer flag help, the interface SHOULD support structured flag details alongside the existing `map[string]string`:
+
+```go
+type Usage struct {
+    Usage   string
+    Options map[string]string       // Existing: simple name → description
+    Flags   []FlagDefinition        // New, optional: structured flag metadata
+}
+
+type FlagDefinition struct {
+    Long        string   // Long flag name (e.g., "output")
+    Short       string   // Short flag name (e.g., "o")
+    Description string
+    Default     string   // Default value (e.g., "json")
+    HasArg      bool     // Whether the flag takes an argument
+    Required    bool     // Whether the flag is required
+}
+```
+
+If `Flags` is populated, the CLI SHOULD use it for help display instead of `Options`. If only `Options` is populated, the current behavior is preserved. This maintains full backward compatibility.
 
 ### Plugin Repository Improvements
 
