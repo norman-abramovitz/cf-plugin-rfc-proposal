@@ -26,7 +26,7 @@ The current CF CLI plugin interface suffers from several critical issues that ha
 
 5. **Tight coupling to CLI internals.** The plugin API exposes methods that proxy CAPI V2 endpoints and return V2-shaped data structures (e.g., `GetApp`, `GetApps`, `GetOrg`, `GetServiceInstances`). These methods embed CF domain semantics into the plugin contract.
 6. **V2 API dependency.** With CAPI V2 reaching end of life, plugins that rely on V2-shaped data from the plugin interface will stop working entirely, even though equivalent V3 functionality exists.
-7. **Insufficient versioning.** The plugin interface does not provide sufficient semantic versioning support as the CLI version changes.
+7. **Insufficient versioning.** The `VersionType` struct provides only `Major`, `Minor`, and `Build` integer fields — no support for SemVer prerelease identifiers (e.g., `-rc.1`) or build metadata (e.g., `+linux.amd64`). The field name `Build` is misleading (it corresponds to SemVer's "patch" number, not build metadata). Plugins that track prerelease or build information (e.g., ocf-scheduler-cf-plugin, cf-targets-plugin) are forced to work around this by printing the full version string when invoked directly without arguments — information that is invisible to the CLI and `cf plugins`.
 8. **No language portability.** The current design does not provide a maintainable path to support plugin development in languages other than Go.
 
 ### Ecosystem Issues
@@ -40,7 +40,7 @@ The current CF CLI plugin interface suffers from several critical issues that ha
 12. **No per-plugin help.** `cf help <plugin-name>` does not work — the CLI only resolves command names and aliases. Users must run `cf plugins` to discover which plugin provides which command.
 13. **Plugin commands are not grouped by plugin.** In `cf help -a`, all plugin commands are listed in a single flat alphabetical list under "INSTALLED PLUGIN COMMANDS:" with no indication of their source plugin.
 14. **Limited help metadata.** The plugin `Command` struct supports only a single-line `HelpText` and a flag-name-to-description map. Built-in commands display examples, related commands, environment variables, and structured flag information through Go struct tags — capabilities unavailable to plugins.
-15. **Minimal flag metadata.** `UsageDetails.Options` is `map[string]string` — plugins cannot specify flag default values, argument types, or whether a flag is required.
+15. **Minimal flag metadata.** `UsageDetails.Options` is `map[string]string` — an unordered hash that loses flag display order. The CLI sorts keys alphabetically and classifies flags by key length: single-character keys become short flags (`-f`), everything else becomes a long flag (`--force`). There is no way to declare `-f` and `--force` as the same flag — each map entry becomes a separate flag with only `Short` or `Long` populated, never both. Plugins cannot specify default values, argument types, required status, or group related flags together. The ocf-scheduler plugin works around this entirely by embedding all flag documentation directly in the `Usage` string, bypassing the `Options` map.
 
 ### Evidence from Active Plugin Maintainers
 
@@ -161,12 +161,16 @@ type PluginMetadata struct {
 type PluginVersion struct {
     Major int
     Minor int
-    Build int
+    Patch int
 
     // Pre-release and build metadata per semver 2.0
-    PreRelease string
-    BuildMeta  string
+    PreRelease string   // e.g., "rc.1", "beta.2"
+    BuildMeta  string   // e.g., "linux.amd64", "20260301"
 }
+
+// String returns the full SemVer 2.0 string representation.
+// Examples: "1.2.3", "1.2.3-rc.1", "1.2.3+linux.amd64", "1.2.3-rc.1+linux.amd64"
+func (v PluginVersion) String() string
 
 type Command struct {
     Name      string
@@ -177,9 +181,22 @@ type Command struct {
 
 type Usage struct {
     Usage   string
-    Options map[string]string
+    Options map[string]string       // Legacy: simple name → description (unordered)
+    Flags   []FlagDefinition        // Preferred: structured, ordered flag metadata
+}
+
+type FlagDefinition struct {
+    Long        string   // Long flag name (e.g., "output")
+    Short       string   // Short flag name (e.g., "o")
+    Description string
+    Default     string   // Default value (e.g., "json")
+    HasArg      bool     // Whether the flag takes an argument
+    Required    bool     // Whether the flag is required
+    Group       string   // Optional group header (e.g., "Output options")
 }
 ```
+
+When `Flags` is populated, the CLI MUST use it for help display instead of `Options`. When only `Options` is populated, the current behavior is preserved. This maintains full backward compatibility while allowing plugins to declare paired long/short flags (`--force`/`-f`), specify defaults and required status, and organize flags into logical groups.
 
 ### Methods Explicitly Removed from the Plugin API
 
@@ -231,7 +248,9 @@ These endpoints enable plugins to integrate with platform services beyond the Cl
 
 #### Semantic Versioning
 
-Plugin versions MUST follow [Semantic Versioning 2.0.0](https://semver.org/). The `PluginVersion` struct includes `PreRelease` and `BuildMeta` fields to support full semver compliance. The CLI MUST display this information in plugin listings and SHOULD warn users when a plugin's `MinCliVersion` exceeds the current CLI version.
+Plugin versions MUST follow [Semantic Versioning 2.0.0](https://semver.org/). The current `VersionType` struct uses only three integer fields (`Major`, `Minor`, `Build`) with no prerelease or build metadata support. The `Build` field name is a misnomer — it corresponds to SemVer's "patch" number, not build metadata. Plugins that need to communicate prerelease status (e.g., `1.0.0-rc.1`) or platform-specific build identifiers (e.g., `+linux.amd64`) cannot do so through the plugin API. The ocf-scheduler and cf-targets plugins work around this by printing the full version string when invoked directly without arguments — but this information is invisible to `cf plugins`.
+
+The new `PluginVersion` struct renames `Build` to `Patch` for clarity and adds `PreRelease` and `BuildMeta` string fields for full SemVer 2.0 compliance. The CLI MUST display the full version string (including prerelease and build metadata when present) in `cf plugins` output and SHOULD warn users when a plugin's `MinCliVersion` exceeds the current CLI version.
 
 #### Improved Help Integration
 
@@ -306,28 +325,27 @@ type Command struct {
 
 When a plugin provides `Examples`, `cf help <command>` SHOULD display them in an EXAMPLES section, matching the format used for built-in commands. These fields are optional — existing plugins that do not set them continue to work without changes.
 
-**4. Enriched flag metadata (optional)**
+**4. Structured flag metadata with grouping**
 
-For plugins that want richer flag help, the interface SHOULD support structured flag details alongside the existing `map[string]string`:
+The `Usage` struct's `Flags []FlagDefinition` field (defined above in [Plugin Registration](#4-plugin-registration)) replaces the legacy `Options map[string]string`. Key improvements:
 
-```go
-type Usage struct {
-    Usage   string
-    Options map[string]string       // Existing: simple name → description
-    Flags   []FlagDefinition        // New, optional: structured flag metadata
-}
+- **Ordered display.** Flags render in the order declared, not alphabetically by hash key.
+- **Paired long/short names.** A single `FlagDefinition` with `Long: "force", Short: "f"` renders as `--force, -f` — impossible with the current map-based approach where each key produces a separate, unpaired entry.
+- **Defaults and required markers.** `Default` and `Required` fields enable `cf help <command>` to display `(Default: json)` or `[required]` annotations, matching the built-in command style.
+- **Flag grouping.** The `Group` field allows plugins to organize flags under logical headers (e.g., "Output options", "Authentication"), producing output like:
 
-type FlagDefinition struct {
-    Long        string   // Long flag name (e.g., "output")
-    Short       string   // Short flag name (e.g., "o")
-    Description string
-    Default     string   // Default value (e.g., "json")
-    HasArg      bool     // Whether the flag takes an argument
-    Required    bool     // Whether the flag is required
-}
+```
+OPTIONS:
+   Output options:
+      --format, -f          Output format (Default: table)
+      --output, -o          Write output to file
+
+   Filtering:
+      --label, -l           Filter by label selector
+      --limit                Maximum number of results
 ```
 
-If `Flags` is populated, the CLI SHOULD use it for help display instead of `Options`. If only `Options` is populated, the current behavior is preserved. This maintains full backward compatibility.
+If `Flags` is populated, the CLI MUST use it for help display instead of `Options`. If only `Options` is populated, the current behavior is preserved. This maintains full backward compatibility.
 
 ### Plugin Repository Improvements
 
