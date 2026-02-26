@@ -12,6 +12,18 @@
 - [x] Define concrete Go interface types (`PluginContext`, `OrgContext`, `SpaceContext`, `PluginVersion`, `Command`, `Usage`, `FlagDefinition`)
 - [x] Draft migration timeline (Phases 1–4 in cli-plugin-interface-todo.md)
 - [x] Add help system findings and proposals to RFC
+- [x] Analyze `VersionType` limitations (Build misnomer, no prerelease/build metadata, plugin workarounds)
+- [x] Analyze `Options map[string]string` limitations (unordered, no long/short pairing, no defaults/grouping, `ConvertPluginToCommandInfo` processing)
+- [x] Review [CF CLI Help Guidelines](https://github.com/cloudfoundry/cli/wiki/CF-CLI-Help-Guidelines) — standard help sections (NAME, USAGE/[docopt](http://docopt.org/), WARNING, EXAMPLE, TIP, ALIAS, OPTIONS, SEE ALSO)
+- [x] Review [CF CLI Style Guide](https://github.com/cloudfoundry/cli/wiki/CF-CLI-Style-Guide) — command naming, fail-fast validation, output formatting, color, flag design
+- [x] Review [CLI Product-Specific Style Guide](https://github.com/cloudfoundry/cli/wiki/CLI-Product-Specific-Style-Guide) — error patterns, TIPs, confirmation prompts, idempotency
+- [x] Review [Version Switching Guide](https://github.com/cloudfoundry/cli/wiki/Version-Switching-Guide) — interface evolution considerations
+- [x] Add version and flag metadata findings to RFC, CLI TODO, and plugin survey
+- [x] Add wiki guide references to RFC, CLI TODO, and plugin survey
+- [x] Define interface evolution strategy (backward-compatible structs, additive RPC, capability discovery, deprecation signaling)
+- [x] Add `Warning`, `Tip` fields to `Command` struct per Help Guidelines
+- [x] Add `Group` field to `FlagDefinition` for organized flag display
+- [x] Rename `PluginVersion.Build` → `Patch` for SemVer correctness; add `PreRelease`, `BuildMeta`, `String()`
 
 ### Decisions Needed
 
