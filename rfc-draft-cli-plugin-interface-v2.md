@@ -37,14 +37,47 @@ The current CF CLI plugin interface suffers from several critical issues that ha
 
 ### Evidence from Active Plugin Maintainers
 
-Multiple active plugin maintainers have independently converged on the same minimal integration pattern:
+A survey of six actively maintained CF CLI plugins reveals that the community has already organically converged on the minimal integration pattern this RFC formalizes. Every plugin uses the CLI primarily as an identity and context provider, not as a domain proxy.
 
-- The **MTA CF CLI plugin** ([cloudfoundry/multiapps-cli-plugin](https://github.com/cloudfoundry/multiapps-cli-plugin)) uses the CLI only for access token, API endpoint, SSL policy, current org/space, and username — all domain operations go through direct CAPI V3 REST calls.
-- The **App Autoscaler plugin** ([cloudfoundry/app-autoscaler-cli-plugin](https://github.com/cloudfoundry/app-autoscaler-cli-plugin)) migrated from V2-style plugin API calls to direct V3 client usage, retaining the CLI only for target context and authentication ([PR #132](https://github.com/cloudfoundry/app-autoscaler-cli-plugin/pull/132)).
-- The **OCF Scheduler plugin** ([ocf-scheduler-cf-plugin](https://github.com/cloudfoundry-community/ocf-scheduler-cf-plugin)) uses the CLI for login verification, access token, API endpoint, current org/space, user email, and app lookups — then makes all scheduler API calls directly.
-- The **cf-java-plugin** maintainer noted that outdated libraries were "a real hassle" and that every plugin has to implement its own option parsing framework.
+#### Plugin Interface Method Usage Across Surveyed Plugins
 
-This convergence demonstrates that the community has already organically adopted the pattern this RFC formalizes.
+| Method | OCF Scheduler | App Autoscaler | MultiApps (MTA) | cf-java | cf-targets | Rabobank plugins |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| `AccessToken()` | Yes | Yes | Yes | — | — | Yes |
+| `ApiEndpoint()` | Yes | Yes | Yes | — | — | Yes |
+| `IsSSLDisabled()` | — | Yes | Yes | — | — | Yes |
+| `IsLoggedIn()` | Yes | Yes | — | — | — | Yes |
+| `GetCurrentOrg()` | Yes | — | Yes | — | — | Yes |
+| `GetCurrentSpace()` | Yes | Yes | Yes | — | — | Yes |
+| `HasOrganization()` | — | — | — | — | — | Yes |
+| `HasSpace()` | — | Yes | — | — | — | Yes |
+| `Username()` | Yes | — | Yes | — | — | Yes |
+| `GetApp()` / `GetApps()` | Yes | **Removed** | — | — | — | — |
+| `CliCommand()` | — | — | help only | **Removed** | — | — |
+| Direct CAPI V3 | — | go-cfclient | raw HTTP | `cf curl` | — | go-cfclient |
+| Direct file I/O | — | — | — | — | config.json | — |
+
+#### Per-Plugin Findings
+
+- The **MTA CF CLI plugin** ([cloudfoundry/multiapps-cli-plugin](https://github.com/cloudfoundry/multiapps-cli-plugin)) uses the CLI for access token, API endpoint, SSL policy, current org/space, and username. All domain operations — apps, services, routes, service bindings — go through direct CAPI V3 REST calls with hand-built HTTP requests. It implements its own JWT-based token caching because `AccessToken()` can be expensive. The only uses of `CliCommand()` are displaying help text and detecting the CLI version — not for domain operations.
+
+- The **App Autoscaler plugin** ([cloudfoundry/app-autoscaler-cli-plugin](https://github.com/cloudfoundry/app-autoscaler-cli-plugin)) explicitly migrated away from V2 methods in [PR #132](https://github.com/cloudfoundry/app-autoscaler-cli-plugin/pull/132). It removed `GetApp()` (which calls `/v2/apps`) and replaced it with `go-cfclient/v3` direct calls. It defines a custom `Connection` interface with only 6 methods: `ApiEndpoint`, `HasSpace`, `IsLoggedIn`, `AccessToken`, `GetCurrentSpace`, and `IsSSLDisabled`. A follow-up fix was needed because `IsSSLDisabled()` was not correctly forwarded to the V3 client — evidence that plugins need first-class SSL config propagation.
+
+- The **OCF Scheduler plugin** ([ocf-scheduler-cf-plugin](https://github.com/cloudfoundry-community/ocf-scheduler-cf-plugin)) uses the CLI for login verification, access token, API endpoint, current org/space, user email, and app lookups. All scheduler API calls are made directly via HTTP. It derives the scheduler service URL from the CF API endpoint by hostname substitution — a fragile pattern that several other plugins also employ.
+
+- The **cf-java-plugin** ([SAP/cf-cli-java-plugin](https://github.com/SAP/cf-cli-java-plugin)) progressively abandoned the plugin interface entirely. It originally used `CliConnection.CliCommand()` for `cf ssh`, but encountered authentication failures where `cf ssh` via the plugin API would fail even though `cf ssh` worked directly from the terminal. As of v4.0.2, the `cliConnection` parameter is completely ignored (`_`), and all CF interaction goes through `exec.Command("cf", ...)`. The plugin uses `cf curl /v3/apps/{GUID}/env` and `cf curl /v3/apps/{GUID}/ssh_enabled` for CAPI V3 access. It also uses `github.com/simonleung8/flags` (last updated July 2017) for option parsing, illustrating the ecosystem stagnation.
+
+- The **cf-targets-plugin** ([cloudfoundry-community/cf-targets-plugin](https://github.com/cloudfoundry-community/cf-targets-plugin)) never calls any `CliConnection` methods at all. Instead, it directly reads and writes `~/.cf/config.json` using internal CF CLI packages (`cf/configuration`, `cf/configuration/coreconfig`). This creates a massive transitive dependency chain (Google Cloud SDK, AWS SDK, BOSH CLI, Kubernetes client-go) for a plugin that only copies JSON files. This demonstrates a gap in the plugin API: there is no way for a plugin to save/restore CLI configuration, so the plugin had to bypass the interface entirely.
+
+- The **Rabobank CF plugins** ([rabobank/cf-plugins](https://github.com/rabobank/cf-plugins)) created a compatibility library that reimplements all V2 plugin methods (`GetApp`, `GetApps`, `GetOrgs`, `GetSpaces`, `GetServices`, etc.) using `go-cfclient/v3`. However, their own consumer plugins (scheduler, credhub, idb, npsb) barely use these reimplemented methods — they primarily use only `AccessToken()`, `ApiEndpoint()`, `GetCurrentOrg()`, `GetCurrentSpace()`, and `Username()`. The `GetApp()` reimplementation alone requires 11 separate V3 API calls to reconstruct the V2-shaped model, and the library's README warns this is "quite inefficient." This is definitive evidence that maintaining V2-shaped domain methods is unsustainable.
+
+#### Key Observations
+
+1. **`AccessToken()`, `ApiEndpoint()`, and `GetCurrentSpace()` are universal.** Every plugin that uses the plugin API at all uses these three methods.
+2. **Domain methods are being actively removed.** The App Autoscaler plugin removed `GetApp()` in PR #132. The cf-java-plugin removed all `CliCommand()` usage. No plugin surveyed relies on `GetOrgs()`, `GetSpaces()`, `GetServices()`, or `GetRoutes()`.
+3. **`CliCommand()` is unreliable.** The cf-java-plugin found that `cf ssh` via the plugin API fails where the direct CLI succeeds. The MTA plugin uses `CliCommand()` only for displaying help and detecting the CLI version — never for domain operations.
+4. **Plugins duplicate boilerplate.** Every plugin independently implements the same precheck flow: verify logged in, verify org/space targeted, get token, get endpoint. This pattern appears verbatim in the OCF Scheduler, Rabobank scheduler, and Rabobank npsb plugins.
+5. **The V2-to-V3 translation cost is prohibitive.** Rabobank's compatibility library proves that reconstructing V2 models from V3 APIs requires many additional API calls and produces incomplete results (e.g., `IsAdmin` is always false). It is not a viable long-term path.
 
 ## Proposal
 
@@ -335,8 +368,22 @@ The following topics are acknowledged but deferred to separate RFCs:
 
 ## References
 
+### Issue and Specification
+
 - [cloudfoundry/cli#3621 — New Plugin Interface](https://github.com/cloudfoundry/cli/issues/3621)
-- [app-autoscaler-cli-plugin PR #132 — Switch to V3 CF API client](https://github.com/cloudfoundry/app-autoscaler-cli-plugin/pull/132)
-- [go-cfclient — Cloud Foundry V3 Go client library](https://github.com/cloudfoundry/go-cfclient)
 - [Current plugin interface — code.cloudfoundry.org/cli/plugin](https://pkg.go.dev/code.cloudfoundry.org/cli/plugin)
+- [go-cfclient — Cloud Foundry V3 Go client library](https://github.com/cloudfoundry/go-cfclient)
 - [Semantic Versioning 2.0.0](https://semver.org/)
+
+### Surveyed Plugins
+
+- [cloudfoundry/app-autoscaler-cli-plugin](https://github.com/cloudfoundry/app-autoscaler-cli-plugin) — [PR #132: Switch to V3 CF API client](https://github.com/cloudfoundry/app-autoscaler-cli-plugin/pull/132)
+- [cloudfoundry/multiapps-cli-plugin](https://github.com/cloudfoundry/multiapps-cli-plugin) (MTA)
+- [cloudfoundry-community/ocf-scheduler-cf-plugin](https://github.com/cloudfoundry-community/ocf-scheduler-cf-plugin)
+- [SAP/cf-cli-java-plugin](https://github.com/SAP/cf-cli-java-plugin)
+- [cloudfoundry-community/cf-targets-plugin](https://github.com/cloudfoundry-community/cf-targets-plugin)
+- [rabobank/cf-plugins](https://github.com/rabobank/cf-plugins) — V2-to-V3 compatibility library
+- [rabobank/scheduler-plugin](https://github.com/rabobank/scheduler-plugin)
+- [rabobank/credhub-plugin](https://github.com/rabobank/credhub-plugin)
+- [rabobank/idb-plugin](https://github.com/rabobank/idb-plugin)
+- [rabobank/npsb-plugin](https://github.com/rabobank/npsb-plugin)
