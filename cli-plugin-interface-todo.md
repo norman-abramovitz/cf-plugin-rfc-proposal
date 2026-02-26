@@ -251,6 +251,13 @@ These methods work by running arbitrary CLI commands and capturing terminal outp
 
 ## Phase 4: Plugin Help Integration
 
+**Goal:** Enable plugins to produce help output consistent with the
+[CF CLI Help Guidelines](https://github.com/cloudfoundry/cli/wiki/CF-CLI-Help-Guidelines),
+[CF CLI Style Guide](https://github.com/cloudfoundry/cli/wiki/CF-CLI-Style-Guide), and
+[CLI Product-Specific Style Guide](https://github.com/cloudfoundry/cli/wiki/CLI-Product-Specific-Style-Guide).
+Currently, plugins can only produce a subset of the standard help sections and cannot
+conform to the flag display conventions.
+
 ### Current help system behavior
 
 **`cf help` (common commands view):**
@@ -302,6 +309,8 @@ type Usage struct {
 
 **What plugins CANNOT provide** (built-in commands get these from Go struct tags):
 - Examples
+- Warning text (critical alerts about command behavior)
+- Tip text (helpful context or deprecation notices)
 - Related commands / "SEE ALSO"
 - Environment variables
 - Flag default values, argument types, required/optional flags
@@ -309,6 +318,29 @@ type Usage struct {
 - Flag grouping (e.g., "Output options", "Filtering")
 - Long-form description beyond the single-line `HelpText`
 - Category grouping within the plugin section
+
+**CF CLI wiki guides that define the expected help format:**
+
+The [CF CLI Help Guidelines](https://github.com/cloudfoundry/cli/wiki/CF-CLI-Help-Guidelines)
+define a standardized help format with 8 sections: NAME, USAGE (following
+[docopt](http://docopt.org/) conventions — `[]` optional, `()` required groups,
+`|` mutually exclusive, `...` repeating), WARNING, EXAMPLE, TIP, ALIAS, OPTIONS
+(alphabetical, long option first with aliases comma-separated, defaults appended as
+`(Default: value)`), and SEE ALSO (comma-separated, alphabetical). Plugins can only
+produce NAME, USAGE, ALIAS, and a limited OPTIONS.
+
+The [CF CLI Style Guide](https://github.com/cloudfoundry/cli/wiki/CF-CLI-Style-Guide)
+establishes conventions for command naming (VERB-NOUN), fail-fast validation order
+(invalid flags → prerequisites → server-side resources), output formatting (tables for
+lists, key/value for single objects, "OK"/"FAILED" feedback), color usage (cyan for
+resource names, green for "OK", red for "FAILED"), and flag design (enum-style flags
+with values over boolean flags). Plugins must implement all of this independently.
+
+The [CLI Product-Specific Style Guide](https://github.com/cloudfoundry/cli/wiki/CLI-Product-Specific-Style-Guide)
+adds product conventions: standard error messages ("Not logged in. Use 'cf login'..."),
+TIP conventions (follow-up commands in single quotes), destructive operation confirmation
+prompts (`--force` to bypass), idempotent operation exit codes (0 if already in desired
+state), and table column ordering (new columns at end for versioning).
 
 **Plugin workarounds observed:**
 - ocf-scheduler: embeds all flag documentation directly in the `Usage` string, bypasses `Options` entirely
@@ -334,21 +366,26 @@ type Usage struct {
 
 #### 4.2 Enrich `Command` struct for richer help
 
+The [CF CLI Help Guidelines](https://github.com/cloudfoundry/cli/wiki/CF-CLI-Help-Guidelines) define 8 standard help sections. The enriched `Command` struct should enable plugins to produce all of them:
+
 - [ ] Add optional fields to the `Command` struct:
 
 ```go
 type Command struct {
     Name         string
     Alias        string
-    HelpText     string          // Short description (existing)
-    Description  string          // Long-form description (new)
-    Examples     string          // Usage examples (new)
-    RelatedCmds  []string        // See also (new)
-    UsageDetails Usage
+    HelpText     string          // Short description (existing) → NAME section
+    Description  string          // Long-form description (new) → extended NAME
+    Warning      string          // Critical alerts (new) → WARNING section
+    Examples     string          // Usage examples (new) → EXAMPLE section
+    Tip          string          // Helpful context (new) → TIP section
+    RelatedCmds  []string        // See also (new) → SEE ALSO section
+    UsageDetails Usage           // → USAGE and OPTIONS sections
 }
 ```
 
-- [ ] Update `ConvertPluginToCommandInfo()` in `command/common/internal/help_display.go` to populate `Examples` and `RelatedCommands` fields
+- [ ] Update `ConvertPluginToCommandInfo()` in `command/common/internal/help_display.go` to populate `Examples`, `RelatedCommands`, `Warning`, and `Tip` fields
+- [ ] `Usage` string SHOULD follow [docopt](http://docopt.org/) conventions (`[]` optional, `()` required groups, `|` mutually exclusive, `...` repeating) per the Help Guidelines
 - [ ] These new fields are optional — existing plugins that don't set them continue to work
 
 #### 4.3 Replace `Usage.Options` map with structured `Flags` slice
@@ -455,7 +492,25 @@ The current plugin interface, when imported via the CLI module, pulls in:
 | Deprecation warnings | Q1 2027 | CLI emits warnings for deprecated methods (`GetApp`, `CliCommand`, etc.) |
 | Removal | Q3 2027+ | Deprecated methods removed from the interface |
 
-### 6.2 Migration documentation
+### 6.2 Interface evolution strategy
+
+The [CF CLI Version Switching Guide](https://github.com/cloudfoundry/cli/wiki/Version-Switching-Guide)
+describes the CLI's approach to major versions: separate binaries (`cf7`, `cf8`) with
+symlink routing. The plugin interface MUST NOT require this pattern for its own evolution.
+
+- [ ] Define backward-compatible struct evolution rules — new fields in `PluginMetadata`,
+  `Command`, `Usage`, `PluginVersion`, and `FlagDefinition` MUST use zero-valued defaults
+  so existing compiled plugins work without recompilation
+- [ ] Define additive RPC method rules — new methods MAY be added; plugins calling
+  methods unsupported by an older CLI SHOULD receive a clear error, not a crash
+- [ ] Consider runtime capability discovery — plugins SHOULD be able to query what
+  capabilities the host CLI provides (e.g., whether `CfClient()` is available)
+- [ ] Define deprecation signaling — the CLI MUST emit runtime warnings (not errors)
+  for deprecated methods, so plugin users know to request updates from maintainers
+- [ ] Document how `MinCliVersion` enforcement should work — currently stored but not
+  meaningfully enforced; the CLI SHOULD warn (not block) when exceeded
+
+### 6.3 Migration documentation
 
 - [ ] Write a migration guide with before/after code examples
 - [ ] Migrate at least one reference plugin (e.g., ocf-scheduler-cf-plugin) as a worked example
@@ -464,8 +519,10 @@ The current plugin interface, when imported via the CLI module, pulls in:
   - `GetService(name)` → `cfclient.ServiceInstances.Single()` with name+space filter
   - `CliCommandWithoutTerminalOutput("curl", path)` → `cfclient` or `http.Client`
   - Deriving service URLs from `ApiEndpoint()`
+- [ ] Document how plugins should follow [CF CLI Style Guide](https://github.com/cloudfoundry/cli/wiki/CF-CLI-Style-Guide) conventions (VERB-NOUN naming, fail-fast validation, output formatting, color usage)
+- [ ] Document how plugins should follow [Product-Specific Style Guide](https://github.com/cloudfoundry/cli/wiki/CLI-Product-Specific-Style-Guide) patterns (error messages, TIPs, confirmation prompts, idempotent operations)
 
-### 6.3 Community communication
+### 6.4 Community communication
 
 - [ ] Post RFC to `cloudfoundry/community` as a PR
 - [ ] Present at CF community call
