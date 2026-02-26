@@ -4,10 +4,29 @@ This document captures the results of surveying actively maintained CF CLI plugi
 to understand how they use the current plugin interface. The findings inform the
 [RFC Draft: CLI Plugin Interface V2](rfc-draft-cli-plugin-interface-v2.md).
 
-**Methodology:** For each plugin, we examined the source code to identify every
-call to `plugin.CliConnection` methods and how the plugin interacts with Cloud
-Foundry (plugin API, direct CAPI calls, `CliCommand` delegation, or external
-process execution).
+**Methodology:** For each plugin, we read the source code directly from GitHub
+(via the `gh` CLI API) and performed the following analysis:
+
+1. **Traced every `plugin.CliConnection` call site** — searched for all
+   invocations of methods like `AccessToken()`, `GetCurrentSpace()`,
+   `CliCommand()`, etc. across the entire codebase.
+2. **Examined `go.mod` dependencies** — identified which CF-related libraries
+   each plugin depends on (go-cfclient, CF CLI plugin SDK version, loggregator,
+   etc.).
+3. **Identified non-plugin-API CF interaction** — traced how plugins talk to
+   Cloud Foundry (or related platform services) outside the plugin interface:
+   go-cfclient V3 typed SDK calls, `CliCommandWithoutTerminalOutput("curl", ...)`
+   for CAPI access, custom `net/http` direct calls, `exec.Command("cf", ...)`
+   subprocess invocation, or direct `~/.cf/config.json` file I/O.
+4. **Read import statements** — identified usage of internal CF CLI packages
+   (e.g., `cf/terminal`, `cf/configuration`) that create tight coupling.
+5. **Reviewed migration PRs** — where available (e.g., App Autoscaler PR #132),
+   examined the before/after to understand what drove the migration.
+
+**Source of plugin list:** Active plugins were identified from
+https://plugins.cloudfoundry.org/ filtered to those with GitHub repository
+activity since 2022 and not archived, plus community plugins from the
+`cloudfoundry-community` and `rabobank` GitHub organizations.
 
 ---
 
@@ -47,28 +66,138 @@ process execution).
 | `CliCommand()` | - | - | help | **Removed** | - | - | - | - | - | - | - | - | - | Y | - | - | Y | Y |
 | `CliCmdWithoutTermOut()` | - | - | version | **Removed** | - | - | - | Y | Y | - | Y | Y | - | Y | Y | Y | - | Y |
 
-### CF Interaction Pattern
+### How Plugins Access Cloud Foundry Outside the Plugin Interface
 
-| Plugin | Pattern |
+Plugins that need to interact with the Cloud Foundry API (or related platform
+services) beyond what the plugin interface provides use one or more of the
+following techniques. Many plugins combine multiple techniques.
+
+#### Technique 1: go-cfclient/v3 Library
+
+Plugins bootstrap a [`go-cfclient/v3`](https://github.com/cloudfoundry/go-cfclient)
+client using `AccessToken()`, `ApiEndpoint()`, and `IsSSLDisabled()` from the
+plugin interface, then use typed SDK methods for CAPI V3 access.
+
+| Plugin | go-cfclient Usage | Library Version |
+|---|---|---|
+| App Autoscaler | `Applications.ListAll()` — app GUID lookup by name+space | `v3.0.0-alpha.19` |
+| DefaultEnv | `Applications.Single()` + `ExecuteAuthRequest()` for `/v3/apps/{guid}/env` | `v3.0.0-alpha.17` |
+| cf-lookup-route | `Domains.ListAll()`, `Routes.ListAll()`, `Applications.ListAll()`, `Spaces.GetIncludeOrganization()` | `v3.0.0-alpha.9` |
+| Rabobank cf-plugins | Reimplements all V2 model methods via V3; exposes `CfClient()` to consumers | `v3.0.0-alpha.15` |
+| mysql-cli (find-bindings) | V2 library: `go-cfclient/v2` for services, plans, bindings, apps, spaces, orgs | `v2` (community fork) |
+
+**How they get credentials:** `AccessToken()` + `ApiEndpoint()` + `IsSSLDisabled()` from the plugin interface, passed to `cfconfig.New()` / `cfclient.New()`.
+
+**Exception — cf-lookup-route:** Reads `~/.cf/config.json` directly via `cfconfig.NewFromCFHome()` instead of using the plugin interface for credentials.
+
+#### Technique 2: `CliCommandWithoutTerminalOutput("curl", "/v3/...")`
+
+Plugins use the plugin interface's `CliCommandWithoutTerminalOutput` method to
+run `cf curl` against CAPI endpoints. The CLI handles authentication
+automatically. Plugins receive `[]string` (lines of JSON) which they parse
+manually into custom structs.
+
+| Plugin | CAPI Endpoints Accessed via `cf curl` |
 |---|---|
-| OCF Scheduler | Plugin API context + direct HTTP to scheduler API |
-| App Autoscaler | Plugin API context + go-cfclient V3 for app lookup + direct HTTP to autoscaler API |
-| MultiApps (MTA) | Plugin API context + direct CAPI V3 HTTP + deploy-service API |
-| cf-java-plugin | `exec.Command("cf", ...)` for everything; plugin API completely unused at runtime |
-| cf-targets-plugin | Direct `~/.cf/config.json` file I/O; plugin API completely unused |
-| Rabobank plugins | Plugin API context + go-cfclient V3 + direct HTTP to service APIs |
-| upgrade-all-services | Plugin API context + direct CAPI V3 HTTP (custom requester) |
-| stack-auditor | `CliCommandWithoutTerminalOutput("curl", ...)` + `GetOrgs()` + `exec.Command("cf", "restage", ...)` |
-| log-cache-cli | Plugin API context + `CliCommandWithoutTerminalOutput` for GUID resolution + go-log-cache library |
-| DefaultEnv | Plugin API context + go-cfclient V3 |
-| metric-registrar | `CliCommandWithoutTerminalOutput` for CLI commands + V2 curl + `GetApp`/`GetApps`/`GetServices` |
-| service-instance-logs | `CliCommandWithoutTerminalOutput` V2 curl + `GetService()` + direct HTTP to log endpoint |
-| spring-cloud-services | Plugin API context + `GetService()` + `GetApps()` + direct HTTP to SCS broker |
-| mysql-cli-plugin | `CliCommandWithoutTerminalOutput` for CLI commands + V3 curl + go-cfclient V2 + `GetService()` |
-| swisscom appcloud | `CliCommandWithoutTerminalOutput("curl", ...)` for all API access + `GetService()`/`GetOrg()` |
-| html5-apps-repo | Hybrid: `CliCommandWithoutTerminalOutput("curl", ...)` for reads, direct HTTP for writes + UAA token exchange |
-| cf-lookup-route | go-cfclient V3 (reads `~/.cf/config.json` directly); plugin API only for validation |
-| list-services | `GetApp()` + `CliCommandWithoutTerminalOutput("curl", "/v3/service_bindings...")` |
+| stack-auditor | `/v3/apps` (list/patch), `/v3/apps/{guid}/actions/start\|stop`, `/v2/spaces`, `/v2/buildpacks`, `/v2/stacks/{guid}` |
+| log-cache-cli | `/v3/apps?guids=...` (bulk resolve), `/v3/service_instances?guids=...` (bulk resolve) |
+| metric-registrar | `/v2/user_provided_service_instances`, `/v2/apps/{guid}` |
+| service-instance-logs | `/v2/service_plans/{guid}`, `/v2/services/{guid}` (endpoint discovery chain) |
+| mysql-cli (migrate) | `/v3/apps`, `/v3/tasks` (create + poll) |
+| swisscom appcloud | `/custom/*` (proprietary endpoints), `/v3/audit_events` |
+| html5-apps-repo (reads) | `/v3/service_offerings`, `/v3/service_plans`, `/v3/service_instances`, `/v3/service_credential_bindings`, `/v3/apps/{guid}/env` |
+| list-services | `/v3/service_bindings?app_guids=...` (paginated) |
+
+**Why `cf curl` instead of direct HTTP?** The CLI handles the `Authorization`
+header automatically, so plugins don't need to call `AccessToken()` or manage
+TLS configuration. The trade-off is that response headers are not accessible
+(which is why html5-apps-repo uses direct HTTP for writes that return `202`
+with a `Location` header).
+
+#### Technique 3: Custom Direct HTTP (net/http)
+
+Plugins construct their own `http.Client`, set `Authorization: Bearer <token>`
+using `AccessToken()`, configure TLS via `IsSSLDisabled()`, and make raw HTTP
+requests to CAPI V3 or service-specific endpoints.
+
+| Plugin | Library / Approach | Endpoints |
+|---|---|---|
+| upgrade-all-services | Custom `Requester` struct with `jsonry` for JSON | CAPI V3: `/v3/service_plans`, `/v3/service_instances` (GET/PATCH) |
+| MTA (MultiApps) | Raw `net/http` with manual URL construction | CAPI V3: `/v3/apps`, `/v3/service_instances`, `/v3/service_credential_bindings`; MTA deploy-service API |
+| html5-apps-repo (writes) | Raw `net/http` | CAPI V3: POST/DELETE service instances + service keys; UAA `/oauth/token` |
+| spring-cloud-services | Custom `AuthenticatedClient` wrapper | SCS broker: `/cli/instance/{guid}`, `/eureka/apps`, `/actuator/info` |
+| OCF Scheduler | `github.com/ess/hype` HTTP library | Scheduler API: `/jobs`, `/calls`, `/schedules` etc. |
+| App Autoscaler | Raw `net/http` | Autoscaler API: `/v1/apps/{id}/policy`, `/v1/apps/{id}/scaling_histories` etc. |
+| Rabobank consumers | Raw `net/http` | Various service-specific APIs (scheduler, credhub broker, identity broker, network policy) |
+| service-instance-logs | `github.com/cloudfoundry/noaa` (WebSocket) | Service instance log streaming endpoint |
+| log-cache-cli | `code.cloudfoundry.org/go-log-cache/v3` | Log Cache HTTP API (read, meta, PromQL) |
+
+**How they get credentials:** `AccessToken()` for the bearer token, `ApiEndpoint()` for URL construction, `IsSSLDisabled()` for TLS config — all from the plugin interface.
+
+#### Technique 4: `CliCommandWithoutTerminalOutput` for CLI Command Delegation
+
+Plugins use `CliCommandWithoutTerminalOutput` (or `CliCommand`) to run CF CLI
+subcommands as workflow steps, relying on the CLI to handle the full lifecycle
+(auth, targeting, API version negotiation, output formatting).
+
+| Plugin | CLI Commands Delegated |
+|---|---|
+| metric-registrar | `create-user-provided-service`, `bind-service`, `unbind-service`, `delete-service` |
+| mysql-cli (migrate) | `push`, `bind-service`, `start`, `delete`, `rename-service`, `create-service-key`, `delete-service-key`, `service-key`, `logs --recent` |
+| log-cache-cli | `app <name> --guid`, `service <name> --guid` (GUID resolution) |
+| stack-auditor | `stack --guid <name>` (GUID resolution) |
+| cf-lookup-route | `target -o <org> -s <space>` (optional re-targeting) |
+| MTA | `version` (CLI version detection), `help` (help display) |
+| list-services | `help list-services` (help display) |
+
+#### Technique 5: `exec.Command("cf", ...)` — Bypass Plugin API Entirely
+
+Plugins invoke the `cf` CLI binary as a subprocess via `os/exec`, completely
+bypassing the plugin RPC interface. This is used as a workaround for plugin API
+reliability issues.
+
+| Plugin | What They Run via exec.Command | Why |
+|---|---|---|
+| cf-java-plugin | `cf ssh`, `cf app --guid`, `cf curl /v3/...`, `cf apps` | `CliConnection.CliCommand("ssh", ...)` had authentication failures that did not occur when running `cf ssh` directly |
+| stack-auditor | `cf restage --strategy rolling` | Long-running commands are problematic via the plugin RPC bridge |
+
+#### Technique 6: Direct File I/O on `~/.cf/config.json`
+
+Plugins read the CLI's configuration file directly from disk, bypassing the
+plugin interface completely.
+
+| Plugin | What They Read/Write | Why |
+|---|---|---|
+| cf-targets-plugin | Full `~/.cf/config.json` read/write/copy | Saves and restores complete CLI config snapshots (targets). No plugin API method exists to set or restore configuration. |
+| cf-lookup-route | `~/.cf/config.json` read only | Initializes go-cfclient via `cfconfig.NewFromCFHome()` instead of using plugin API methods |
+
+**Why bypass the plugin API?** The plugin interface is read-only for configuration.
+There is no `SetApiEndpoint()`, `SetCurrentOrg()`, or `SetAccessToken()`. Plugins
+that need to write or restore configuration have no choice but to manipulate the
+file directly.
+
+### Technique Usage Summary
+
+| Plugin | go-cfclient | `cf curl` | Direct HTTP | CLI delegation | `exec.Command` | File I/O |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| OCF Scheduler | - | - | Y (`hype`) | - | - | - |
+| App Autoscaler | **V3** | - | Y (autoscaler API) | - | - | - |
+| MTA (MultiApps) | - | - | Y (CAPI V3 + deploy svc) | version, help | - | - |
+| cf-java-plugin | - | - | - | - | **all** | - |
+| cf-targets-plugin | - | - | - | - | - | **all** |
+| Rabobank plugins | **V3** | - | Y (service APIs) | - | - | - |
+| upgrade-all-services | - | - | Y (CAPI V3) | - | - | - |
+| stack-auditor | - | **V2+V3** | - | `stack --guid` | `restage` | - |
+| log-cache-cli | - | **V3** (bulk) | Y (log-cache API) | `app/service --guid` | - | - |
+| DefaultEnv | **V3** | - | - | - | - | - |
+| metric-registrar | - | **V2** | - | `create/bind/unbind/delete-service` | - | - |
+| service-instance-logs | - | **V2** | Y (log streaming) | - | - | - |
+| spring-cloud-services | - | - | Y (SCS broker) | - | - | - |
+| mysql-cli | **V2** | **V3** | - | `push`, `bind`, `restage`, etc. | - | - |
+| swisscom appcloud | - | custom+V3 | - | - | - | - |
+| html5-apps-repo | - | **V3** (reads) | Y (writes + UAA) | - | - | - |
+| cf-lookup-route | **V3** | - | - | `target` (optional) | - | Y (read) |
+| list-services | - | **V3** | - | help | - | - |
 
 ---
 
