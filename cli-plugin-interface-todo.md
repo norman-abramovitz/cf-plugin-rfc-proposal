@@ -445,7 +445,7 @@ INSTALLED PLUGIN COMMANDS:
 
 #### 4.5 Update plugin config storage
 
-- [ ] Ensure `~/.cf/plugins/config.json` stores any new metadata fields (`Description`, `Examples`, `RelatedCmds`)
+- [ ] Ensure `~/.cf/plugins/config.json` stores any new metadata fields (`Description`, `Warning`, `Examples`, `Tip`, `RelatedCmds`)
 - [ ] The `configv3.PluginCommand` struct must be updated in parallel:
   - `util/configv3/plugins_config.go` — `PluginCommand` struct
   - `cf/configuration/pluginconfig/plugin_data.go` — legacy `PluginMetadata`

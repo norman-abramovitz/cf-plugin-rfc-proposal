@@ -174,9 +174,14 @@ type PluginVersion struct {
 func (v PluginVersion) String() string
 
 type Command struct {
-    Name      string
-    Alias     string
-    HelpText  string
+    Name         string
+    Alias        string
+    HelpText     string     // Short one-line description
+    Description  string     // Long-form description (optional)
+    Warning      string     // Critical alerts about command behavior (optional)
+    Examples     string     // Usage examples (optional)
+    Tip          string     // Helpful context or deprecation notices (optional)
+    RelatedCmds  []string   // "See also" commands (optional)
     UsageDetails Usage
 }
 
