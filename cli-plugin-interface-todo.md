@@ -20,7 +20,7 @@ and `cf/terminal`.
 
 | File | Contents |
 |---|---|
-| `plugin/plugin.go` | `Plugin`, `CliConnection`, `PluginMetadata`, `VersionType`, `Command`, `Usage` |
+| `plugin/plugin.go` | `Plugin`, `CliConnection`, `PluginMetadata`, `VersionType` (Major/Minor/Build ints only — no SemVer prerelease or build metadata), `Command`, `Usage` (Options is `map[string]string` — unordered, no long/short pairing, no defaults) |
 | `plugin/cli_connection.go` | `cliConnection` struct — RPC client that dials `127.0.0.1:<port>` |
 | `plugin/plugin_shim.go` | `Start()`, `MinCliVersionStr()`, metadata exchange |
 | `plugin/models/*.go` (13 files) | All model types (`GetAppModel`, `Organization`, `Space`, etc.) — only import is `time` |
@@ -164,15 +164,25 @@ type Plugin interface {
 
 - [ ] Update `PluginMetadata` with full semver support:
 
+The current `VersionType` struct uses only `Major`, `Minor`, and `Build` integer fields. The `Build` field name is a misnomer — it corresponds to SemVer's "patch" number, not build metadata. Plugins that track prerelease or platform-specific build identifiers (e.g., `1.0.0-rc.1+linux.amd64`) cannot communicate this through the plugin API. The ocf-scheduler and cf-targets plugins work around this by printing the full version string when invoked directly without arguments — but this information is invisible to `cf plugins`.
+
 ```go
 type PluginVersion struct {
     Major      int
     Minor      int
-    Build      int
-    PreRelease string
-    BuildMeta  string
+    Patch      int        // Renamed from Build for SemVer correctness
+    PreRelease string     // e.g., "rc.1", "beta.2"
+    BuildMeta  string     // e.g., "linux.amd64", "20260301"
 }
+
+// String returns the full SemVer 2.0 string representation.
+// Examples: "1.2.3", "1.2.3-rc.1", "1.2.3+linux.amd64"
+func (v PluginVersion) String() string
 ```
+
+- [ ] Update `PluginVersion.String()` in `util/configv3/plugins_config.go` — currently renders `Major.Minor.Build` or `"N/A"` — to include `PreRelease` and `BuildMeta`
+- [ ] Update `cf plugins` output to show full SemVer strings
+- [ ] Ensure backward compatibility: existing plugins with only `Major`/`Minor`/`Build` still work (missing fields default to empty strings)
 
 ### 2.3 Deprecate V2-coupled methods
 
@@ -283,13 +293,26 @@ type Usage struct {
 }
 ```
 
+**How `Options map[string]string` is processed** (in `ConvertPluginToCommandInfo()`, `command/common/internal/help_display.go`):
+1. Map keys are collected into a slice and sorted alphabetically
+2. Each key is classified by length: 1 character → short flag (`-f`), otherwise → long flag (`--force`)
+3. Each entry becomes a separate `CommandFlag` with only `Short` OR `Long` populated — never both
+4. The paired rendering path `--force, -f` in `FlagWithHyphens()` is unreachable for plugin flags
+5. The `Default` field on `CommandFlag` is always empty (no way to set it through the map)
+
 **What plugins CANNOT provide** (built-in commands get these from Go struct tags):
 - Examples
 - Related commands / "SEE ALSO"
 - Environment variables
 - Flag default values, argument types, required/optional flags
+- Long/short flag pairing (e.g., `--force, -f` as a single flag)
+- Flag grouping (e.g., "Output options", "Filtering")
 - Long-form description beyond the single-line `HelpText`
 - Category grouping within the plugin section
+
+**Plugin workarounds observed:**
+- ocf-scheduler: embeds all flag documentation directly in the `Usage` string, bypasses `Options` entirely
+- cf-targets: uses only single-character keys in `Options` (e.g., `"f"`) to ensure they render as short flags
 
 ### Help system improvements
 
@@ -328,25 +351,44 @@ type Command struct {
 - [ ] Update `ConvertPluginToCommandInfo()` in `command/common/internal/help_display.go` to populate `Examples` and `RelatedCommands` fields
 - [ ] These new fields are optional — existing plugins that don't set them continue to work
 
-#### 4.3 Enrich `Usage.Options` for richer flag help
+#### 4.3 Replace `Usage.Options` map with structured `Flags` slice
 
-- [ ] Consider replacing `Options map[string]string` with a structured type:
+The current `Options map[string]string` has fundamental limitations:
+
+1. **Unordered.** Go maps have no guaranteed iteration order. The CLI works around this by collecting keys into a slice and sorting alphabetically (`command/common/internal/help_display.go` `ConvertPluginToCommandInfo()`). Plugins cannot control display order.
+2. **No long/short flag pairing.** Each map key becomes a separate flag entry. `ConvertPluginToCommandInfo()` classifies by key length: single-character keys → short flag (`-f`), everything else → long flag (`--force`). A single `FlagDefinition` with both `Long: "force"` and `Short: "f"` is impossible — the paired rendering path in `FlagWithHyphens()` (`--force, -f`) is unreachable for plugin flags.
+3. **No defaults, required status, or value placeholders.** The map value is only the description string. Built-in commands display `(Default: json)` annotations through Go struct tags — plugins cannot.
+4. **No grouping.** All flags render in a single flat list. Plugins with many flags (e.g., `create-job` with disk, memory, health check, and scheduling options) cannot organize them logically.
+5. **Workaround in practice.** The ocf-scheduler plugin bypasses `Options` entirely, embedding all flag documentation directly in the `Usage` string to maintain control over ordering and formatting.
+
+- [ ] Add `Flags []FlagDefinition` to the `Usage` struct alongside the existing `Options` for backward compatibility:
 
 ```go
-type FlagDetail struct {
-    Description string
-    Default     string   // default value
-    Required    bool
-    HasArg      bool     // whether the flag takes an argument
-}
 type Usage struct {
     Usage   string
-    Options map[string]FlagDetail   // BREAKING — needs migration path
+    Options map[string]string       // Legacy: simple name → description (unordered)
+    Flags   []FlagDefinition        // Preferred: structured, ordered flag metadata
+}
+
+type FlagDefinition struct {
+    Long        string   // Long flag name (e.g., "output")
+    Short       string   // Short flag name (e.g., "o")
+    Description string
+    Default     string   // Default value (e.g., "json")
+    HasArg      bool     // Whether the flag takes an argument
+    Required    bool     // Whether the flag is required
+    Group       string   // Optional group header (e.g., "Output options")
 }
 ```
 
-- [ ] Alternatively, keep the `map[string]string` for backward compatibility and add a parallel `OptionsV2 map[string]FlagDetail` field
-- [ ] This is lower priority — the current string-only options work adequately
+- [ ] Update `ConvertPluginToCommandInfo()` in `command/common/internal/help_display.go`:
+  - If `Flags` is populated, use it instead of `Options`
+  - Each `FlagDefinition` with both `Long` and `Short` produces a single `CommandFlag` with both fields set, enabling the `--force, -f` paired rendering
+  - Render `Default` and `Required` annotations matching the built-in command style
+  - Render flags grouped by `Group` header when present
+- [ ] If only `Options` is populated, preserve the current behavior (alphabetical sort, length-based classification)
+- [ ] Update `configv3.PluginCommand` and `pluginconfig.PluginMetadata` to store `Flags` in `~/.cf/plugins/config.json`
+- [ ] Backward compatible: existing plugins that use only `Options` continue to work without changes
 
 #### 4.4 Group plugin commands by plugin in `cf help -a`
 
