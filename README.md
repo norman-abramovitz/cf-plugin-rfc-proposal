@@ -13,6 +13,7 @@ directly. This RFC formalizes that pattern as the new plugin interface.
 ## Documents
 
 - [RFC Draft: CLI Plugin Interface V2](rfc-draft-cli-plugin-interface-v2.md)
+- [Plugin Survey](plugin-survey.md) — Analysis of 18 actively maintained CF CLI plugins
 - [TODO](TODO.md) — Outstanding work items
 
 ## Related
