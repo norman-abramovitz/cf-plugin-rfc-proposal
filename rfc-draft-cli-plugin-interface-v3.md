@@ -397,6 +397,35 @@ The embedded metadata JSON MUST include a `schema_version` field to allow the fo
 {"schema_version":1,"name":"...","protocol":"jsonrpc","version":{...},"commands":[...]}
 ```
 
+##### Marker Survivability in Self-Extracting and Compressed Executables
+
+Plugin binaries may be distributed as self-extracting archives or compressed executables. The `CF_PLUGIN_METADATA:` marker approach remains viable in these scenarios because all common self-extracting formats contain uncompressed regions that are scannable without execution.
+
+**Executable compressors (UPX).** UPX compresses all program sections including `.rodata` (ELF) and `.rdata` (PE), which is where Go string constants and `ldflags -X` values reside. A marker embedded as a Go string constant would be compressed and invisible to byte scanning. However, UPX copies overlay data (bytes appended after the logical end of the executable) by default (`--overlay=copy`). A marker appended as a trailer survives UPX compression intact. For PE binaries, UPX also provides `--compress-resources=0` and `--keep-resource=type` options to preserve specific PE resources uncompressed.
+
+**Linux self-extracting formats:**
+
+| Format | Structure | Uncompressed region for marker |
+|--------|-----------|-------------------------------|
+| makeself | Shell script stub + compressed TAR | Shell header is plain text; marker goes in a comment |
+| AppImage | ELF runtime stub + SquashFS image | Runtime stub has scannable `.rodata`; custom ELF sections (like `.upd_info`) are standard practice |
+| shar | Entirely plain-text shell script | Any comment line |
+
+**Windows self-extracting formats:**
+
+| Format | Structure | Uncompressed region for marker |
+|--------|-----------|-------------------------------|
+| NSIS | PE stub (~34KB) + compressed installer data | PE resources (RT_RCDATA, VS_VERSION_INFO) in stub |
+| Inno Setup | PE stub + compressed script + compressed files | PE resources in stub |
+| 7-Zip SFX | PE stub + UTF-8 config block + 7z archive | Config block is plain-text UTF-8, fully scannable |
+| WinRAR SFX | PE stub + RAR archive | PE resources; archive comments stored uncompressed |
+
+**macOS considerations.** Mach-O binaries support custom segments added before `__LINKEDIT` (e.g., via Go's `-sectcreate` linker flag or post-build tools like [postject](https://github.com/nodejs/postject)). Appending data after the binary is possible but invalidates code signatures; the custom segment approach is preferred.
+
+**Character safety.** All JSON characters (`{}[]":,\/`) are standard ASCII printable characters (byte values 0x22–0x7D) and are safe to embed in any binary format — ELF sections, PE resources, Mach-O segments, overlay data, and script comments. UTF-8 multibyte sequences are equally safe in all binary contexts since sections and overlays store raw bytes with no character restrictions. No encoding (e.g., Base64) is needed for the metadata marker.
+
+**Scanning algorithm.** The CLI scanner performs a simple byte scan of the plugin file for the `CF_PLUGIN_METADATA:` prefix, then reads forward to extract the JSON object (tracking brace nesting to find the matching `}`). This works regardless of where in the file the marker appears — in a compiled string constant, a script comment, an overlay region, a PE resource, or a self-extracting archive's uncompressed header. The marker's unique prefix eliminates false positives; no commonly used library or framework produces this byte sequence.
+
 #### Runtime Protocol Selection
 
 At runtime, the CLI reads the stored `protocol` field from plugin config and selects the appropriate channel implementation:

@@ -24,6 +24,7 @@
 - [x] Add `Warning`, `Tip` fields to `Command` struct per Help Guidelines
 - [x] Add `Group` field to `FlagDefinition` for organized flag display
 - [x] Rename `PluginVersion.Build` → `Patch` for SemVer correctness; add `PreRelease`, `BuildMeta`, `String()`
+- [x] Research `CF_PLUGIN_METADATA:` marker survivability in self-extracting and compressed executables (UPX, makeself, AppImage, NSIS, 7-Zip SFX, etc.) — character safety confirmed for JSON in all formats
 
 ### Decisions Made
 

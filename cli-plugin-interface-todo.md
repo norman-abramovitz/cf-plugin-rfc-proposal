@@ -260,6 +260,7 @@ These methods work by running arbitrary CLI commands and capturing terminal outp
 - [ ] When marker is found: parse JSON, store metadata + `protocol` field in `~/.cf/plugins/config.json`, skip the existing gob/RPC metadata exchange
 - [ ] When marker is not found: fall back to existing `exec.Command(path, PORT, "SendMetadata")` flow
 - [ ] Update `configv3.Plugin` struct to include `Protocol` field
+- [ ] Ensure marker scanner handles self-extracting/compressed binaries (marker survives in overlay data, PE resources, shell script headers, and 7-Zip SFX config blocks — see RFC "Marker Survivability" section)
 
 ### 3b.3 Runtime protocol selection
 
