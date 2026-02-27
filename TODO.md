@@ -1,4 +1,4 @@
-# TODO — CLI Plugin Interface V2 RFC
+# TODO — CLI Plugin Interface V3 RFC
 
 ## RFC Document
 

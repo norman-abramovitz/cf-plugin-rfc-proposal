@@ -1,4 +1,4 @@
-# CF CLI Plugin Interface V2 — RFC Proposal
+# CF CLI Plugin Interface V3 — RFC Proposal
 
 This repository contains an RFC proposal to modernize the Cloud Foundry CLI plugin interface.
 
@@ -12,7 +12,7 @@ directly. This RFC formalizes that pattern as the new plugin interface.
 
 ## Documents
 
-- [RFC Draft: CLI Plugin Interface V2](rfc-draft-cli-plugin-interface-v2.md)
+- [RFC Draft: CLI Plugin Interface V3](rfc-draft-cli-plugin-interface-v3.md)
 - [Plugin Survey](plugin-survey.md) — Analysis of 18 actively maintained CF CLI plugins
 - [CLI Plugin Interface TODO](cli-plugin-interface-todo.md) — What needs to change in the CLI codebase
 - [TODO](TODO.md) — Overall RFC work items
