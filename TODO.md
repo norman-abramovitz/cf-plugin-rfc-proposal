@@ -25,12 +25,23 @@
 - [x] Add `Group` field to `FlagDefinition` for organized flag display
 - [x] Rename `PluginVersion.Build` → `Patch` for SemVer correctness; add `PreRelease`, `BuildMeta`, `String()`
 
-### Decisions Needed
+### Decisions Made
 
-- [ ] Decide: Should `CfClient()` be part of the core contract or a separate helper package?
-- [ ] Decide: Which additional endpoints to include (UAA, Doppler, Routing API, CredHub)
-- [ ] Decide: Should `CliCommand`/`CliCommandWithoutTerminalOutput` be kept for any transition use?
-- [ ] Add error handling and edge case guidance (expired tokens, no target, etc.)
+- [x] `CfClient()` placement → **Companion package** (`cli-plugin-helpers/cfclient`), not core contract. Core contract provides only serializable primitives. See RFC "CF Client Access" section.
+- [x] Communication architecture → **Channel abstraction** (`Send`/`Receive`/`Open`/`Close`) with `GobTCPChannel` (legacy) and `JsonRpcChannel` (new polyglot). See RFC "Communication Architecture" section.
+- [x] Message format → **JSON-RPC 2.0** for new-protocol plugins. stdout/stderr reserved for plugin user output.
+- [x] Install-time metadata → **Embedded `CF_PLUGIN_METADATA:` marker** scanned from the binary/script. No execution needed. Legacy plugins detected by absence of marker.
+- [x] `CliCommand`/`CliCommandWithoutTerminalOutput` → **Legacy protocol only**. Not part of the new JSON-RPC contract. Plugins use their own clients for CAPI access.
+
+### Decisions Still Needed
+
+- [ ] Decide: Which additional endpoints to include (UAA, Doppler, Routing API, CredHub) — or provide a generic `Endpoint(name string)` method
+- [ ] Define JSON-RPC method names, parameter schemas, and standard error codes (e.g., `NOT_LOGGED_IN`, `TOKEN_EXPIRED`, `NO_TARGET`)
+- [ ] Define the `CF_PLUGIN_METADATA:` JSON schema formally (with `schema_version` field for evolution)
+- [ ] Define plugin lifecycle events in JSON-RPC (install, uninstall, upgrade notifications)
+- [ ] Add error handling and edge case guidance (expired tokens, no target, plugin crashes mid-stream)
+- [ ] Decide: How to pass connection info to new-protocol plugins (env vars `CF_PLUGIN_PORT`, `CF_PLUGIN_PROTOCOL` vs. other mechanism)
+- [ ] Decide: Does the message serialization format need to be fixed to JSON? The channel abstraction could support alternative serialization formats (e.g., MessagePack, CBOR, Protobuf) alongside JSON-RPC — the `CF_PLUGIN_METADATA:` marker could declare the preferred format.
 
 ### Stakeholder Review
 

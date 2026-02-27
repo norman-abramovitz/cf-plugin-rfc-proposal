@@ -91,11 +91,12 @@ A survey of six actively maintained CF CLI plugins reveals that the community ha
 ### Design Principles
 
 1. **CLI as context provider, not domain proxy.** The CLI MUST provide authentication, endpoint, and target context. It MUST NOT provide CF domain models or proxy CAPI endpoints.
-2. **Plugin as CAPI consumer.** Plugins MUST own their CAPI V3 interaction, domain logic, and resource mapping.
-3. **Minimal stable contract.** The plugin API surface MUST be kept small to minimize breaking changes as the CLI evolves.
-4. **Standardized CF access.** The interface SHOULD provide a standardized way to obtain a configured [go-cfclient](https://github.com/cloudfoundry/go-cfclient) V3 client, while not preventing plugins from using alternative libraries.
-5. **Backward-compatible transition.** The new interface SHOULD be introduced alongside the existing interface with a documented migration path and deprecation timeline.
-6. **Style guide conformance.** The plugin metadata and help system SHOULD enable plugins to produce output consistent with the [CF CLI Style Guide](https://github.com/cloudfoundry/cli/wiki/CF-CLI-Style-Guide), [Help Guidelines](https://github.com/cloudfoundry/cli/wiki/CF-CLI-Help-Guidelines), and [Product-Specific Style Guide](https://github.com/cloudfoundry/cli/wiki/CLI-Product-Specific-Style-Guide). Specifically, plugins SHOULD be able to declare structured flag metadata (long/short pairs, defaults, grouping), provide EXAMPLE and SEE ALSO help sections, and follow USAGE synopsis conventions per [docopt](http://docopt.org/).
+2. **Plugin as CAPI consumer.** Plugins MUST own their CAPI V3 interaction, domain logic, and resource mapping. Plugins choose their own client libraries and communication protocols for backend service interaction — the CLI MUST NOT constrain these choices.
+3. **Minimal stable contract.** The plugin API surface MUST be kept small to minimize breaking changes as the CLI evolves. The core contract MUST contain only serializable primitives (strings, booleans, simple structs) that can cross a process boundary over any wire protocol.
+4. **Protocol-agnostic communication.** The CLI-to-plugin communication MUST be abstracted behind a channel interface (`Send`/`Receive`/`Open`/`Close`). The CLI code MUST NOT depend on any specific wire protocol. This enables the same contract to be served over the existing `net/rpc` transport (for backward compatibility) and JSON-RPC 2.0 (for polyglot plugin support) without changing the CLI's core logic.
+5. **Language portability.** The plugin interface MUST NOT require plugins to be written in Go. Plugin metadata MUST be discoverable without executing the plugin through a Go-specific protocol. Companion packages (e.g., a Go helper that provides a pre-configured `go-cfclient` client) MAY be provided as conveniences but MUST NOT be part of the core contract.
+6. **Backward-compatible transition.** The new interface SHOULD be introduced alongside the existing interface with a documented migration path and deprecation timeline.
+7. **Style guide conformance.** The plugin metadata and help system SHOULD enable plugins to produce output consistent with the [CF CLI Style Guide](https://github.com/cloudfoundry/cli/wiki/CF-CLI-Style-Guide), [Help Guidelines](https://github.com/cloudfoundry/cli/wiki/CF-CLI-Help-Guidelines), and [Product-Specific Style Guide](https://github.com/cloudfoundry/cli/wiki/CLI-Product-Specific-Style-Guide). Specifically, plugins SHOULD be able to declare structured flag metadata (long/short pairs, defaults, grouping), provide EXAMPLE and SEE ALSO help sections, and follow USAGE synopsis conventions per [docopt](http://docopt.org/).
 
 ### Core Plugin API Contract
 
@@ -215,27 +216,64 @@ The following categories of methods from the current plugin interface MUST NOT b
 - **Route methods:** `GetRoutes` — plugins MUST use CAPI V3 directly
 - **CLI command execution:** `CliCommand`, `CliCommandWithoutTerminalOutput` — plugins MUST NOT depend on CLI command output parsing
 
-### Standardized CF Client Access
+### CF Client Access (Companion Package)
 
-The plugin interface SHOULD provide a convenience method to obtain a pre-configured [go-cfclient](https://github.com/cloudfoundry/go-cfclient) V3 client:
+`CfClient()` MUST NOT be part of the core plugin contract. The core contract provides only serializable primitives (`AccessToken()`, `ApiEndpoint()`, `IsSSLDisabled()`) that cross the process boundary between the CLI and plugin. A pre-configured CF client object cannot be serialized over any wire protocol (net/rpc, JSON-RPC, gRPC, or otherwise).
+
+Instead, a companion Go package SHOULD be provided (e.g., `code.cloudfoundry.org/cli-plugin-helpers/cfclient`) that constructs a [go-cfclient](https://github.com/cloudfoundry/go-cfclient) V3 client from the core contract primitives:
 
 ```go
-// CfClient returns a configured go-cfclient v3 client using the current
-// session's access token, API endpoint, and SSL configuration.
-//
-// This is the RECOMMENDED way for plugins to interact with Cloud Foundry.
-// Plugins MAY use alternative libraries, but go-cfclient provides
-// canonical CF API V3 models and is maintained by the Cloud Foundry community.
-CfClient() (*cfclient.Client, error)
+// Package cfhelper — companion package, NOT part of the core contract.
+package cfhelper
+
+import (
+    "github.com/cloudfoundry/go-cfclient/v3/client"
+    "github.com/cloudfoundry/go-cfclient/v3/config"
+)
+
+// NewCfClient creates a go-cfclient V3 client using session information
+// from the plugin context. This is the RECOMMENDED way for Go plugins
+// to interact with Cloud Foundry.
+func NewCfClient(ctx PluginContext) (*client.Client, error) {
+    token, err := ctx.AccessToken()
+    if err != nil {
+        return nil, err
+    }
+    endpoint, err := ctx.ApiEndpoint()
+    if err != nil {
+        return nil, err
+    }
+    skipSSL, err := ctx.IsSSLDisabled()
+    if err != nil {
+        return nil, err
+    }
+
+    cfg, err := config.New(endpoint,
+        config.Token(token),
+        config.SkipTLSValidation(skipSSL),
+    )
+    if err != nil {
+        return nil, err
+    }
+    return client.New(cfg)
+}
 ```
 
-This standardization:
-- Eliminates duplicate HTTP client setup code across plugins
-- Provides a single, community-maintained source for CAPI V3 models
-- Reduces the barrier to entry for new plugin developers
-- Ensures plugins automatically benefit from go-cfclient updates
+This design reflects a three-layer architecture:
 
-Plugins are NOT required to use this client — they MAY use any HTTP client or CF library — but this SHOULD be the documented and recommended path.
+```
+Layer 1: CLI ←→ Plugin hosting (channel abstraction: Send/Receive/Open/Close)
+Layer 2: Core contract (serializable primitives: tokens, endpoints, context)
+Layer 3: Plugin ←→ Backend service (plugin's choice: go-cfclient, gRPC, HTTP, etc.)
+```
+
+The core contract (Layer 2) provides the building blocks. The companion package is a Layer 3 convenience for Go plugins. Plugins in other languages use their own CF client libraries — a Python plugin would use its own HTTP library, a Java plugin would use cf-java-client — all using the same `AccessToken()` and `ApiEndpoint()` primitives from the core contract.
+
+This separation:
+- Keeps the core contract dependency-free and language-agnostic
+- Avoids coupling the interface module version to go-cfclient's version (which is still at alpha)
+- Allows the companion package to evolve independently
+- Enables polyglot plugins without any core contract changes
 
 ### Additional Endpoint Access
 
@@ -250,11 +288,149 @@ The plugin interface SHOULD provide methods to discover related CF platform serv
 
 These endpoints enable plugins to integrate with platform services beyond the Cloud Controller without having to discover endpoints independently.
 
+### Communication Architecture
+
+#### Current State
+
+The current CLI-to-plugin communication uses Go's `net/rpc` with `encoding/gob` serialization over TCP on localhost. The CLI starts an RPC server on a random port, launches the plugin as a subprocess, and passes the port as `os.Args[1]`. The plugin dials `127.0.0.1:<port>` to call back into the CLI for context methods (`AccessToken()`, `GetCurrentSpace()`, etc.). This architecture has two limitations: `encoding/gob` is Go-specific (preventing polyglot plugins), and each RPC call opens a new TCP connection (inefficient for plugins that make many context calls).
+
+#### Channel Abstraction
+
+The CLI MUST abstract all plugin communication behind a channel interface:
+
+```go
+type PluginChannel interface {
+    Open() error
+    Send(msg Message) error
+    Receive() (Message, error)
+    Close() error
+}
+```
+
+The CLI's core logic — command dispatch, metadata retrieval, context serving — works only with `PluginChannel`. The channel implementation handles transport and serialization. This allows the same CLI code to serve plugins over different protocols:
+
+| Implementation | Transport | Serialization | Use Case |
+|---|---|---|---|
+| `GobTCPChannel` | TCP localhost | `encoding/gob` | Legacy Go plugins (backward compat) |
+| `JsonRpcChannel` | TCP localhost | JSON-RPC 2.0 | New polyglot plugins |
+
+The legacy `net/rpc` transport does not need to be replaced — it is perfectly serviceable plumbing. It can carry new JSON-RPC payloads alongside the existing gob-encoded methods. The transport is not the constraint; the serialization format is.
+
+#### Message Format: JSON-RPC 2.0
+
+New plugins MUST use [JSON-RPC 2.0](https://www.jsonrpc.org/specification) as the message format. JSON-RPC provides:
+- **Bidirectional request/response** — both CLI and plugin can initiate calls, with correlation IDs for matching responses
+- **Notifications** — one-way messages (e.g., progress updates, cancellation signals)
+- **Standardized error codes** — structured error reporting
+- **Universal language support** — any language that can read/write JSON can participate
+
+The CLI and plugin communicate bidirectionally over the same channel:
+
+```
+CLI                                         Plugin
+ │                                            │
+ │  {"jsonrpc":"2.0","method":"Run",          │
+ │   "params":{"command":"create-job",        │
+ │             "args":["myapp","myjob"]},     │
+ │   "id":1}                                  │
+ │───────────────────────────────────────────►│
+ │                                            │
+ │  {"jsonrpc":"2.0","method":"AccessToken",  │
+ │   "id":100}                                │
+ │◄───────────────────────────────────────────│
+ │                                            │
+ │  {"jsonrpc":"2.0","result":"bearer eyJ..", │
+ │   "id":100}                                │
+ │───────────────────────────────────────────►│
+ │                                            │
+ │  {"jsonrpc":"2.0","result":{"status":"ok"},│
+ │   "id":1}                                  │
+ │◄───────────────────────────────────────────│
+```
+
+#### Output Separation
+
+`stdout` and `stderr` MUST remain available for the plugin's user-facing output. The JSON-RPC protocol channel MUST use a separate transport (TCP connection). This preserves the current behavior where plugins write directly to `stdout` for user output, while keeping the protocol stream clean and parseable.
+
+#### Install-Time Metadata: Embedded Marker
+
+During `cf install-plugin`, the CLI needs to retrieve plugin metadata without knowing what protocol the plugin speaks. The CLI MUST NOT need to execute the plugin to discover its metadata.
+
+Plugins MUST embed a `CF_PLUGIN_METADATA:` marker string followed by a JSON object in the plugin file (binary or script). The CLI scans the file for this marker and extracts the metadata directly:
+
+**Compiled Go binary:**
+```go
+var _ = `CF_PLUGIN_METADATA:{"name":"AutoScaler","protocol":"jsonrpc","version":{"major":4,"minor":1,"patch":2},"commands":[{"name":"autoscaling-api","alias":"asa","help_text":"Set or view AutoScaler service API endpoint"}]}`
+```
+
+**Python script:**
+```python
+#!/usr/bin/env python3
+# CF_PLUGIN_METADATA:{"name":"my-plugin","protocol":"jsonrpc","version":{"major":1,"minor":0,"patch":0},"commands":[{"name":"my-command","help_text":"Does something"}]}
+```
+
+**Perl script:**
+```perl
+#!/usr/bin/env perl
+# CF_PLUGIN_METADATA:{"name":"my-plugin","protocol":"jsonrpc","version":{"major":1,"minor":0,"patch":0},"commands":[{"name":"my-command","help_text":"Does something"}]}
+```
+
+The install flow becomes:
+
+```
+1. Read plugin file (binary or script)
+2. Scan for CF_PLUGIN_METADATA: marker
+3. Found → parse JSON, store metadata + protocol in config.json, copy to plugins dir
+4. Not found → legacy Go plugin, use existing exec + gob/net/rpc metadata exchange
+```
+
+This approach:
+- Works with any language (compiled or interpreted) — any executable can contain the marker string
+- Requires no execution of untrusted code during install
+- Is deterministic — no timeout-based protocol probing or fallback heuristics
+- Preserves full backward compatibility with existing Go plugins (no marker = legacy)
+- Includes a `protocol` field so the CLI knows how to communicate at runtime
+
+The embedded metadata JSON MUST include a `schema_version` field to allow the format to evolve:
+
+```json
+{"schema_version":1,"name":"...","protocol":"jsonrpc","version":{...},"commands":[...]}
+```
+
+#### Runtime Protocol Selection
+
+At runtime, the CLI reads the stored `protocol` field from plugin config and selects the appropriate channel implementation:
+
+```go
+plugin := config.GetPlugin("AutoScaler")
+
+var ch PluginChannel
+switch plugin.Protocol {
+case "jsonrpc":
+    ch = NewJsonRpcChannel(listener)
+case "netrpc-gob", "":
+    ch = NewGobChannel(listener)  // legacy default
+}
+
+ch.Open()
+defer ch.Close()
+ch.Send(RunCommand{Name: command, Args: args})
+// ... handle bidirectional communication
+```
+
+Connection information (e.g., TCP port) SHOULD be passed to new-protocol plugins via environment variables (`CF_PLUGIN_PORT`, `CF_PLUGIN_PROTOCOL`) rather than positional arguments, to avoid conflicts with plugin argument parsing. Legacy plugins continue to receive the port as `os.Args[1]`.
+
+#### Security Improvement
+
+The channel abstraction also improves security. The current model exposes a TCP port on localhost that is accessible to any process on the machine during the plugin's execution window. Future channel implementations MAY use process-private communication mechanisms (e.g., file descriptor passing) to eliminate this exposure.
+
 ### Enhanced Plugin Metadata
 
 #### Semantic Versioning
 
-Plugin versions MUST follow [Semantic Versioning 2.0.0](https://semver.org/). The current `VersionType` struct uses only three integer fields (`Major`, `Minor`, `Build`) with no prerelease or build metadata support. The `Build` field name is a misnomer — it corresponds to SemVer's "patch" number, not build metadata. Plugins that need to communicate prerelease status (e.g., `1.0.0-rc.1`) or platform-specific build identifiers (e.g., `+linux.amd64`) cannot do so through the plugin API. The ocf-scheduler and cf-targets plugins work around this by printing the full version string when invoked directly without arguments — but this information is invisible to `cf plugins`.
+Plugin versions MUST follow [Semantic Versioning 2.0.0](https://semver.org/). The current `VersionType` struct uses only three integer fields (`Major`, `Minor`, `Build`) with no prerelease or build metadata support. The `Build` field name is a misnomer — it corresponds to SemVer's "patch" number, not build metadata. Plugins that need to communicate prerelease status (e.g., `1.0.0-rc.1`) or platform-specific build identifiers (e.g., `+linux.amd64`) cannot do so through the plugin API. The ocf-scheduler, app-autoscaler, and cf-targets plugins work around this by printing the full version string when invoked directly without arguments — but this information is invisible to `cf plugins`.
+
+Additionally, plugins that front a backend service have two versions to track: the plugin's own release version and the version of the service API they interface with. For example, the App Autoscaler plugin (v4.x) talks to the autoscaler service's `/v1/` API, and the OCF Scheduler plugin has its own SemVer but depends on the Scheduler service API. These versions are independently maintained, yet the current `VersionType` provides no way to express service API compatibility — plugins cannot signal which service API version they require or support.
 
 The new `PluginVersion` struct renames `Build` to `Patch` for clarity and adds `PreRelease` and `BuildMeta` string fields for full SemVer 2.0 compliance. The CLI MUST display the full version string (including prerelease and build metadata when present) in `cf plugins` output and SHOULD warn users when a plugin's `MinCliVersion` exceeds the current CLI version.
 
@@ -366,29 +542,32 @@ While a full plugin repository redesign is outside the scope of this RFC, the fo
 
 ### Migration Path
 
-#### Phase 1: Introduce New Interface (Target: Q3 2026)
+#### Phase 1: Channel Abstraction and Embedded Metadata (Target: Q3 2026)
 
-- Publish the new plugin interface as a standalone Go module (e.g., `code.cloudfoundry.org/cli-plugin-api/v2`).
-- The new module MUST have zero dependencies on the CLI's internal packages.
+- Implement the `PluginChannel` interface (`Send`/`Receive`/`Open`/`Close`) in the CLI.
+- Implement `GobTCPChannel` wrapping the existing `net/rpc` transport — no behavior change for existing plugins.
+- Add `CF_PLUGIN_METADATA:` marker scanning to `cf install-plugin`.
+- Publish the core contract as a standalone Go module (e.g., `code.cloudfoundry.org/cli-plugin-api/v2`) with zero external dependencies.
+- Publish the `cfhelper` companion package for Go plugins.
 - Document migration guides with before/after examples.
-- Provide a reference plugin implementation demonstrating the recommended pattern.
 
-#### Phase 2: Dual Support (Target: Q4 2026)
+#### Phase 2: JSON-RPC and Polyglot Support (Target: Q4 2026)
 
-- The CLI MUST support both the legacy and new plugin interfaces simultaneously.
-- New plugins SHOULD use the new interface.
-- Existing plugins continue to work without modification.
+- Implement `JsonRpcChannel` for new-protocol plugins.
+- The CLI MUST support both legacy (gob/net/rpc) and new (JSON-RPC) plugins simultaneously, determined by the `protocol` field stored during install.
+- Publish JSON-RPC contract documentation (method names, parameter schemas, error codes) so that non-Go plugins can be developed.
+- Provide reference plugin implementations in Go and at least one other language (e.g., Python).
 
 #### Phase 3: Deprecation (Target: Q1 2027)
 
 - The legacy plugin interface is formally deprecated.
-- The CLI emits warnings when loading plugins that use the legacy interface.
+- The CLI emits warnings when loading plugins that do not have embedded metadata (legacy protocol).
 - Plugin repository begins flagging plugins that use the deprecated interface.
 
 #### Phase 4: Removal (Target: Q3 2027 or later)
 
-- The legacy plugin interface is removed from the CLI.
-- All actively maintained plugins are expected to have migrated.
+- The legacy `GobTCPChannel` and associated gob/net/rpc code is removed from the CLI.
+- All actively maintained plugins are expected to have migrated to embedded metadata and JSON-RPC.
 
 #### Interface Evolution Strategy
 
@@ -396,58 +575,68 @@ The [CF CLI Version Switching Guide](https://github.com/cloudfoundry/cli/wiki/Ve
 
 1. **Backward-compatible struct evolution.** New fields added to `PluginMetadata`, `Command`, `Usage`, `PluginVersion`, and `FlagDefinition` MUST be optional (zero-valued defaults). Existing compiled plugins MUST continue to work without recompilation.
 2. **Additive RPC methods.** New methods MAY be added to the RPC interface. Plugins that call methods not supported by an older CLI SHOULD receive a clear error indicating the method is unavailable, rather than a crash.
-3. **Runtime capability discovery.** Plugins SHOULD be able to discover what capabilities the host CLI provides, enabling graceful degradation on older CLIs (e.g., use `CfClient()` if available, fall back to `AccessToken()` + manual HTTP setup).
+3. **Runtime capability discovery.** Plugins SHOULD be able to discover what capabilities the host CLI provides, enabling graceful degradation on older CLIs (e.g., check whether `RefreshToken()` is available, fall back to single-use `AccessToken()` if not).
 4. **Deprecation signaling.** When the CLI deprecates plugin API methods, it MUST emit runtime warnings (not errors) so that plugin users know to request updates from plugin maintainers.
 
 ### Reference Architecture
 
-The following diagram illustrates the recommended plugin architecture:
+The following diagram illustrates the three-layer plugin architecture:
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                    CF CLI                            │
-│                                                     │
-│  ┌───────────────────────────────────────────────┐  │
-│  │           Plugin Host Interface                │  │
-│  │                                                │  │
-│  │  Session:  AccessToken, RefreshToken,          │  │
-│  │           IsLoggedIn, Username                 │  │
-│  │                                                │  │
-│  │  Endpoint: ApiEndpoint, IsSSLDisabled,         │  │
-│  │           ApiVersion, UaaEndpoint              │  │
-│  │                                                │  │
-│  │  Context:  GetCurrentOrg, GetCurrentSpace,     │  │
-│  │           HasOrganization, HasSpace            │  │
-│  │                                                │  │
-│  │  Client:   CfClient() → go-cfclient v3        │  │
-│  │                                                │  │
-│  │  Register: GetMetadata, Run                    │  │
-│  └───────────────────────────────────────────────┘  │
-└────────────────────┬────────────────────────────────┘
-                     │
-                     │ Plugin API Contract
-                     │ (minimal, stable)
-                     │
-┌────────────────────▼────────────────────────────────┐
-│                  Plugin                              │
-│                                                     │
-│  ┌─────────────┐  ┌─────────────────────────────┐  │
-│  │  Plugin      │  │  Domain Logic                │  │
-│  │  Commands    │  │                              │  │
-│  │             │──▶│  Uses go-cfclient V3 or     │  │
-│  │  Registration│  │  custom HTTP client to       │  │
-│  │  Help text   │  │  interact with CAPI V3      │  │
-│  │  Flag parsing│  │  and other platform APIs     │  │
-│  └─────────────┘  └──────────────┬──────────────┘  │
-└───────────────────────────────────┼──────────────────┘
-                                    │
-                          Direct CAPI V3 calls
-                                    │
-                                    ▼
-                     ┌──────────────────────────┐
-                     │  Cloud Controller V3 API  │
-                     │  UAA, Doppler, etc.       │
-                     └──────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                         CF CLI                            │
+│                                                          │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │  Layer 2: Core Contract (serializable primitives)  │  │
+│  │                                                    │  │
+│  │  Session:  AccessToken, RefreshToken,              │  │
+│  │           IsLoggedIn, Username                     │  │
+│  │                                                    │  │
+│  │  Endpoint: ApiEndpoint, IsSSLDisabled,             │  │
+│  │           ApiVersion, UaaEndpoint                  │  │
+│  │                                                    │  │
+│  │  Context:  GetCurrentOrg, GetCurrentSpace,         │  │
+│  │           HasOrganization, HasSpace                │  │
+│  └──────────────────────┬─────────────────────────────┘  │
+│                          │                                │
+│  ┌──────────────────────▼─────────────────────────────┐  │
+│  │  Layer 1: Channel Abstraction (Send/Receive/       │  │
+│  │           Open/Close)                              │  │
+│  │                                                    │  │
+│  │  ┌──────────────┐  ┌───────────────────────────┐  │  │
+│  │  │ GobTCPChannel│  │ JsonRpcChannel            │  │  │
+│  │  │ (legacy)     │  │ (new — polyglot)          │  │  │
+│  │  └──────────────┘  └───────────────────────────┘  │  │
+│  └────────────────────────────────────────────────────┘  │
+└──────────────────────────┬───────────────────────────────┘
+                           │
+                           │ TCP (localhost)
+                           │
+┌──────────────────────────▼───────────────────────────────┐
+│                        Plugin                             │
+│  (any language: Go, Python, Java, Perl, Rust, ...)       │
+│                                                          │
+│  ┌──────────────────┐  ┌─────────────────────────────┐  │
+│  │  Embedded         │  │  Layer 3: Domain Logic       │  │
+│  │  Metadata         │  │  (plugin's choice)           │  │
+│  │  (CF_PLUGIN_      │  │                              │  │
+│  │   METADATA:)      │  │  Go:     go-cfclient, HTTP   │  │
+│  │                   │  │  Python: requests, grpcio    │  │
+│  │  stdout/stderr    │  │  Java:   cf-java-client      │  │
+│  │  for user output  │  │  Any:    gRPC, REST, custom  │  │
+│  └──────────────────┘  └──────────────┬──────────────┘  │
+└───────────────────────────────────────┼──────────────────┘
+                                        │
+                              Plugin's choice of protocol
+                              (HTTP, gRPC, RSocket, etc.)
+                                        │
+                                        ▼
+                         ┌──────────────────────────┐
+                         │  Cloud Controller V3 API  │
+                         │  Autoscaler API           │
+                         │  Scheduler API            │
+                         │  UAA, Doppler, etc.       │
+                         └──────────────────────────┘
 ```
 
 ### Example: Migrating a Plugin
@@ -471,9 +660,14 @@ func (p *MyPlugin) Run(cli plugin.CliConnection, args []string) {
 **After (new interface):**
 
 ```go
+import (
+    pluginapi "code.cloudfoundry.org/cli-plugin-api/v2"
+    "code.cloudfoundry.org/cli-plugin-helpers/cfclient"
+)
+
 func (p *MyPlugin) Run(ctx pluginapi.PluginContext, args []string) {
-    // Get a configured V3 client
-    client, _ := ctx.CfClient()
+    // Get a configured V3 client via companion package
+    client, _ := cfhelper.NewCfClient(ctx)
 
     // Get current space from context
     space, _ := ctx.GetCurrentSpace()
@@ -490,9 +684,12 @@ func (p *MyPlugin) Run(ctx pluginapi.PluginContext, args []string) {
 
 ### Future Considerations
 
-The following topics are acknowledged but deferred to separate RFCs:
+**Enabled by this RFC but requiring further design:**
 
-- **Polyglot plugin support** (HashiCorp-style gRPC plugin model) — enables plugins in languages other than Go.
+- **Polyglot plugin SDKs.** The embedded metadata marker and JSON-RPC 2.0 protocol enable plugins in any language. Community-maintained SDKs for Python, Java, and other languages can be developed independently of the CLI, implementing the JSON-RPC channel client and providing language-idiomatic wrappers for the core contract methods.
+
+**Deferred to separate RFCs:**
+
 - **GitHub-style plugin distribution** — trust model, signing, and automated security scanning.
 - **CLI adoption of go-cfclient internally** — centralizing CAPI interaction across CLI and plugins.
 - **Standard option parsing** — providing a shared flag parsing framework to improve UX consistency across plugins.
@@ -505,6 +702,7 @@ The following topics are acknowledged but deferred to separate RFCs:
 - [Current plugin interface — code.cloudfoundry.org/cli/plugin](https://pkg.go.dev/code.cloudfoundry.org/cli/plugin)
 - [go-cfclient — Cloud Foundry V3 Go client library](https://github.com/cloudfoundry/go-cfclient)
 - [Semantic Versioning 2.0.0](https://semver.org/)
+- [JSON-RPC 2.0 Specification](https://www.jsonrpc.org/specification)
 - [docopt — Command-line interface description language](http://docopt.org/)
 
 ### CF CLI Wiki Guides

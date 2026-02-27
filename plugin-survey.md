@@ -472,7 +472,7 @@ SemVer prerelease identifiers (e.g., `-rc.1`, `-beta.2`) or build metadata (e.g.
 |---|---|---|
 | OCF Scheduler | Print full version when run without args | `main()` checks `len(os.Args[1:]) == 0`, prints full SemVer including `SemVerPrerelease` and `SemVerBuild` (set via `-ldflags`), plus build date, VCS URL, VCS commit ID, and VCS commit date |
 | cf-targets | Print full version when run without args | Same pattern as OCF Scheduler — prints full SemVer, build date, VCS info, and license notices for embedded libraries |
-| App Autoscaler | None observed | Uses only Major/Minor/Build integers |
+| App Autoscaler | Print full version when run without args | Same pattern as OCF Scheduler — `main()` prints `Upstream Version` (Major.Minor.Build), plus `BuildPrerelease`, `BuildMeta`, `BuildDate`, `BuildVcsUrl`, `BuildVcsId`, and `BuildVcsIdDate` (all set via `-ldflags` in Makefile) |
 | MTA (MultiApps) | None observed | Uses only Major/Minor/Build integers |
 | Rabobank cf-plugins | Hardcoded user agent version | `userAgent` string is manually set, not derived from `VersionType` |
 
@@ -480,6 +480,7 @@ SemVer prerelease identifiers (e.g., `-rc.1`, `-beta.2`) or build metadata (e.g.
 - The `Build` field name is misleading — plugins that use it (e.g., `getVersion("Patch", SemVerPatch)` in OCF Scheduler) map their SemVer patch number to this field, not build metadata.
 - Plugins that set version via `-ldflags` (linker variables) at build time can track `SemVerPrerelease` and `SemVerBuild` in code, but cannot pass these to the CLI through the plugin API.
 - The information printed by the workaround (run without args) is invisible to `cf plugins` — users cannot see prerelease status or build provenance through the CLI.
+- **Plugins that front a backend service have two versions to track.** The plugin has its own release version, but it also depends on a specific version of the external service API it interfaces with. For example, the App Autoscaler plugin (v4.x) talks to the autoscaler service's `/v1/` API, and the OCF Scheduler plugin has its own SemVer but depends on the Scheduler service API. The plugin version and the service API version are independently maintained, yet the current `VersionType` provides no way to express service API compatibility — plugins cannot signal which service API version they require or support.
 
 ---
 
@@ -544,7 +545,7 @@ converts plugin flag metadata into the internal `CommandFlag` representation:
 |---|---|---|---|
 | OCF Scheduler | **Not used** | Embeds all flag docs in `Usage` string | Complete bypass — `Usage` string contains `--disk[=], -k LIMIT`, `--memory[=], -m LIMIT` etc. with manual formatting. This preserves flag ordering and long/short pairing. |
 | cf-targets | Short keys only | Minimal | `"f": "replace the current target..."` — uses 1-char key so it renders correctly as `-f` |
-| App Autoscaler | Not observed | Uses `go-flags` | Flag parsing via `github.com/jessevdk/go-flags` — help is handled by the library, not the plugin API |
+| App Autoscaler | Not used | Uses `go-flags` | Flag parsing via `github.com/jessevdk/go-flags` — help is handled by the library, not the plugin API. Options are embedded in `Usage` strings. |
 | MTA (MultiApps) | Not observed | Complex | Multi-line usage strings with embedded flag documentation |
 | cf-java-plugin | Not observed | N/A | Uses `github.com/simonleung8/flags` (2017) — flag parsing and help handled by the library |
 | Rabobank plugins | Not observed | Minimal | Simple commands with few flags |

@@ -127,10 +127,12 @@ type PluginContext interface {
     HasOrganization() (bool, error)
     HasSpace() (bool, error)
 
-    // CF Client (recommended for CAPI V3 access)
-    CfClient() (*cfclient.Client, error)
 }
 ```
+
+Note: `CfClient()` is NOT part of the core interface — it lives in a companion package
+(`cli-plugin-helpers/cfclient`). The core contract contains only serializable primitives
+that can cross the process boundary over any wire protocol (gob, JSON-RPC, etc.).
 
 - [ ] Define minimal context types (replacing the V2-shaped models):
 
@@ -146,10 +148,7 @@ type SpaceContext struct {
 }
 ```
 
-- [ ] Decide: Does `CfClient()` live in the core interface or a separate helper package?
-  - Pro of core: eliminates boilerplate in every plugin
-  - Con of core: adds `go-cfclient` as a dependency to the interface module
-  - Possible compromise: provide `CfClient()` in a companion package (e.g., `cli-plugin-interface/cfclient`) that plugins opt into
+- [x] ~~Decide: Does `CfClient()` live in the core interface or a separate helper package?~~ **Decision: Companion package.** The core contract provides only serializable primitives (`AccessToken()`, `ApiEndpoint()`, `IsSSLDisabled()`). A `NewCfClient(ctx)` helper in `cli-plugin-helpers/cfclient` constructs a go-cfclient V3 client from those primitives. This keeps the core interface dependency-free and language-agnostic.
 
 ### 2.2 New `Plugin` interface
 
@@ -213,11 +212,7 @@ func (v PluginVersion) String() string
 The config-derived methods already exist and are trivial reads from `coreconfig.Repository`. The following need new implementation:
 
 - [ ] `RefreshToken()` — read from `cliConfig.RefreshToken()` (likely already available)
-- [ ] `CfClient()` — this is the biggest change. Options:
-  - **Option A: Server-side construction** — the CLI builds a `go-cfclient` client using its own config and passes it over RPC. Problem: `go-cfclient.Client` is not RPC-serializable.
-  - **Option B: Client-side construction** — the plugin constructs the client locally using `AccessToken()` + `ApiEndpoint()` + `IsSSLDisabled()`. The `CfClient()` method on the RPC client would do this internally without an actual RPC call.
-  - **Option C: Helper package** — provide a `NewCfClient(ctx PluginContext)` function that plugins call. No RPC change needed.
-  - **Recommendation: Option B or C** — both avoid RPC serialization issues. Option C is cleanest (no interface change).
+- [x] ~~`CfClient()`~~ — **Resolved: companion package (Option C).** `CfClient()` is NOT an RPC method. A `NewCfClient(ctx PluginContext)` function in the `cli-plugin-helpers/cfclient` companion package constructs a go-cfclient V3 client using `AccessToken()` + `ApiEndpoint()` + `IsSSLDisabled()` from the core contract. No RPC change needed.
 - [ ] `UaaEndpoint()` — read from `cliConfig.UAAEndpoint()` or derive from `/v3/info`
 - [ ] `RoutingApiEndpoint()` — read from `cliConfig.RoutingAPIEndpoint()`
 
@@ -246,6 +241,45 @@ These methods work by running arbitrary CLI commands and capturing terminal outp
 - [ ] Keep functional during deprecation period
 - [ ] Add CLI-side warnings when these methods are used
 - [ ] Remove when deprecated methods are removed
+
+---
+
+## Phase 3b: Communication Architecture
+
+### 3b.1 Channel abstraction
+
+- [ ] Define the `PluginChannel` interface (`Open`/`Send`/`Receive`/`Close`)
+- [ ] Implement `GobTCPChannel` wrapping the existing `net/rpc` transport — this MUST produce no behavior change for existing plugins
+- [ ] Implement `JsonRpcChannel` using JSON-RPC 2.0 over TCP
+- [ ] Refactor `plugin/rpc/run_plugin.go` and `plugin/rpc/cli_rpc_server.go` to use the channel abstraction instead of directly calling `net/rpc`
+
+### 3b.2 Embedded metadata support
+
+- [ ] Add `CF_PLUGIN_METADATA:` marker scanning to `cf install-plugin` (`command/common/install_plugin_command.go`)
+- [ ] Define the embedded metadata JSON schema (with `schema_version` field)
+- [ ] When marker is found: parse JSON, store metadata + `protocol` field in `~/.cf/plugins/config.json`, skip the existing gob/RPC metadata exchange
+- [ ] When marker is not found: fall back to existing `exec.Command(path, PORT, "SendMetadata")` flow
+- [ ] Update `configv3.Plugin` struct to include `Protocol` field
+
+### 3b.3 Runtime protocol selection
+
+- [ ] Read `Protocol` field from stored plugin config at runtime
+- [ ] Select channel implementation (`GobTCPChannel` vs `JsonRpcChannel`) based on stored protocol
+- [ ] Pass connection info to new-protocol plugins via environment variables (`CF_PLUGIN_PORT`, `CF_PLUGIN_PROTOCOL`) instead of positional arguments
+- [ ] Legacy plugins continue to receive port as `os.Args[1]`
+
+### 3b.4 JSON-RPC contract definition
+
+- [ ] Define JSON-RPC method names for all core contract methods (`AccessToken`, `ApiEndpoint`, `GetCurrentOrg`, etc.)
+- [ ] Define JSON-RPC method names for plugin lifecycle (`Run`, `SetPluginMetadata`)
+- [ ] Define standard error codes (`NOT_LOGGED_IN`, `TOKEN_EXPIRED`, `NO_TARGET`, `METHOD_NOT_AVAILABLE`)
+- [ ] Document the full JSON-RPC contract so non-Go plugin authors can implement it
+
+### 3b.5 Companion package
+
+- [ ] Create `cli-plugin-helpers/cfclient` Go module with `NewCfClient(ctx PluginContext)` function
+- [ ] The companion package MUST NOT be part of the core interface module
+- [ ] The companion package tracks go-cfclient versions independently
 
 ---
 
@@ -504,7 +538,7 @@ symlink routing. The plugin interface MUST NOT require this pattern for its own 
 - [ ] Define additive RPC method rules — new methods MAY be added; plugins calling
   methods unsupported by an older CLI SHOULD receive a clear error, not a crash
 - [ ] Consider runtime capability discovery — plugins SHOULD be able to query what
-  capabilities the host CLI provides (e.g., whether `CfClient()` is available)
+  capabilities the host CLI provides (e.g., whether `RefreshToken()` is available)
 - [ ] Define deprecation signaling — the CLI MUST emit runtime warnings (not errors)
   for deprecated methods, so plugin users know to request updates from maintainers
 - [ ] Document how `MinCliVersion` enforcement should work — currently stored but not
@@ -534,16 +568,30 @@ symlink routing. The plugin interface MUST NOT require this pattern for its own 
 
 ---
 
+## Resolved Questions
+
+1. ~~**`CfClient()` placement**~~ → **Companion package** (`cli-plugin-helpers/cfclient`). Core contract contains only serializable primitives.
+
+2. ~~**RPC protocol versioning**~~ → **Channel abstraction with embedded metadata.** The CLI uses a `PluginChannel` interface (`Send`/`Receive`/`Open`/`Close`) with concrete implementations for `GobTCPChannel` (legacy) and `JsonRpcChannel` (new). Protocol is determined at install time from the `CF_PLUGIN_METADATA:` marker embedded in the plugin binary/script.
+
+3. ~~**`CliCommand` replacement**~~ → Not carried forward in the new JSON-RPC contract. Plugins use their own clients (go-cfclient, HTTP, gRPC, etc.) for all domain operations. Legacy plugins keep `CliCommand` via the `GobTCPChannel`.
+
 ## Open Questions
 
 1. **Module naming:** `code.cloudfoundry.org/cli-plugin-interface` vs `code.cloudfoundry.org/cli-plugin-api` vs `code.cloudfoundry.org/cli/v9/plugin` (stay in-tree)?
 
-2. **RPC protocol versioning:** The current RPC uses Go's `net/rpc` with `encoding/gob`. Should the new interface introduce protocol versioning or capability negotiation? Or is that deferred to a future gRPC-based plugin model?
+2. **Additional endpoints:** Which endpoints belong in the core contract? Specific methods (`UaaEndpoint()`, `DopplerEndpoint()`, etc.) vs. a generic `Endpoint(name string) (string, error)` method that's extensible without interface changes.
 
-3. **`CfClient()` placement:** Core interface vs. companion package vs. standalone helper function?
+3. **JSON-RPC error codes:** Define standard error codes for the core contract methods (e.g., `NOT_LOGGED_IN`, `TOKEN_EXPIRED`, `NO_TARGET`, `METHOD_NOT_AVAILABLE`).
 
-4. **`CliCommand` replacement:** Some plugins (mysql-cli, metric-registrar) use `CliCommand` to orchestrate multi-step workflows (push, bind, restage). Is `CfClient()` sufficient, or do they need a workflow API?
+4. **Embedded metadata schema:** Define the `CF_PLUGIN_METADATA:` JSON schema formally, including `schema_version` for evolution and all required/optional fields.
 
-5. **Plugin configuration write access:** cf-targets-plugin bypasses the plugin API because there's no way to set/restore CLI configuration. Should the new interface provide `SetTarget(org, space)` or similar?
+5. **Plugin lifecycle events:** Should uninstall/upgrade notifications be JSON-RPC methods? Currently the CLI sends `"CLI-MESSAGE-UNINSTALL"` as an arg to the plugin's `Run` method.
 
-6. **Plugin-to-plugin communication:** No plugin currently depends on another plugin, but should the interface support this?
+6. **Plugin configuration write access:** cf-targets-plugin bypasses the plugin API because there's no way to set/restore CLI configuration. Should the new interface provide `SetTarget(org, space)` or similar?
+
+7. **Plugin-to-plugin communication:** No plugin currently depends on another plugin, but should the interface support this?
+
+8. **Connection info passing:** How to pass TCP port and protocol to new-protocol plugins — environment variables (`CF_PLUGIN_PORT`, `CF_PLUGIN_PROTOCOL`) vs. other mechanism.
+
+9. **Message serialization format:** Does the serialization format need to be fixed to JSON? The channel abstraction decouples transport from serialization — alternative formats like MessagePack, CBOR, or Protobuf could be supported alongside JSON-RPC. The `CF_PLUGIN_METADATA:` marker could declare the preferred format (e.g., `"serialization":"json"` or `"serialization":"msgpack"`). JSON is the most universally accessible, but binary formats offer better performance for high-volume data exchange.
