@@ -600,6 +600,94 @@ The plugin interface should support evolution over time without requiring the
 
 ---
 
+## Case Study: Rabobank Guest-Side Transitional Wrapper
+
+The Rabobank [`cf-plugins`](https://github.com/rabobank/cf-plugins) library is a guest-side transitional layer that enables existing Go plugins to migrate from V2 to V3 CAPI access **with no host changes required**. It demonstrates a pattern that is directly relevant to the RFC's companion package and migration strategy.
+
+### Architecture
+
+The library consists of two files (~700 lines total):
+
+**`connection.go`** — Defines a `CliConnection` interface that embeds the standard `plugin.CliConnection` and adds `CfClient()`:
+
+```go
+type CliConnection interface {
+    plugin.CliConnection
+    CfClient() *client.Client
+}
+```
+
+The concrete `cliConnection` struct holds:
+- The original `plugin.CliConnection` (for pass-through of all 16 context methods)
+- A go-cfclient V3 `*client.Client` (constructed from `AccessToken()` + `ApiEndpoint()`)
+
+All context methods (`AccessToken`, `GetCurrentOrg`, `Username`, etc.) delegate to the original connection. Domain methods (`GetApp`, `GetApps`, `GetOrgs`, `GetSpaces`, `GetOrgUsers`, `GetSpaceUsers`, `GetServices`, `GetService`, `GetOrg`, `GetSpace`) are **reimplemented** using go-cfclient V3 calls, returning the same V2-shaped `plugin_models.*` types.
+
+**`plugins.go`** — Provides two entry points:
+
+| Entry Point | Consumer Interface | Description |
+|---|---|---|
+| `plugins.Start(cmd)` | Standard `plugin.Plugin` (`Run(plugin.CliConnection, []string)`) | Wraps the connection transparently; consumer code unchanged |
+| `plugins.Execute(cmd)` | Custom `plugins.Plugin` (`Execute(plugins.CliConnection, []string)`) | Consumer receives the extended interface with `CfClient()` |
+
+Both call `plugin.Start()` internally — the standard host registration mechanism.
+
+### Client Construction
+
+The `newCliConnection()` function constructs go-cfclient using the existing plugin interface:
+
+```go
+func newCliConnection(connection plugin.CliConnection) (CliConnection, error) {
+    apiUrl, _ := connection.ApiEndpoint()
+    token, _ := connection.AccessToken()
+    token = token[7:]  // Strip "bearer " prefix
+    CfConfig, _ := config.New(apiUrl, config.Token(token, ""),
+        config.SkipTLSValidation(), config.UserAgent("cfs-plugin/1.0.9"))
+    CfClient, _ := client.New(CfConfig)
+    return &cliConnection{CfClient, connection}, nil
+}
+```
+
+This is essentially the same pattern the RFC's `cfhelper.NewCfClient()` companion package proposes.
+
+### Consumer Plugin Adoption
+
+Of the 4 Rabobank consumer plugins, adoption varies:
+
+| Plugin | Uses Library? | Entry Point | How It Uses the Library |
+|---|---|---|---|
+| `idb-plugin` | Yes | `plugins.Execute()` | Calls `connection.CfClient()` for direct V3 access; also uses `AccessToken()` for custom HTTP |
+| `credhub-plugin` | Yes | `plugins.Start()` | Calls `connection.GetService()` (V3-reimplemented); custom HTTP for CredHub API |
+| `scheduler-plugin` | No | `plugin.Start()` | Constructs its own go-cfclient via `cfconfig.NewFromCFHomeDir()` |
+| `npsb-plugin` | No | `plugin.Start()` | Uses standard `plugin.CliConnection` directly |
+
+Only 2 of 4 consumer plugins actually adopted the library, demonstrating that migration is incremental — plugins can adopt at their own pace.
+
+### Caveats and Limitations
+
+The Rabobank README documents several caveats arising from V2-to-V3 impedance mismatch:
+
+1. **`IsAdmin` always false.** Organization/space user queries set `IsAdmin` to `false` to avoid querying UAA for role checks.
+2. **Single buildpack only.** `GetApp()` returns only the first buildpack name (V3 supports multiple buildpacks per droplet).
+3. **Single process type.** The V2 `GetAppModel` cannot represent CF's multi-process model; the library uses the first process type.
+4. **No per-app usage statistics in list.** `GetApps()` omits instance stats because V3 requires per-process API calls for each app.
+5. **11 API calls for `GetApp()`.** The V3-reimplemented `GetApp()` requires calls to Applications, EnvironmentVariables, Packages, Droplets, Stacks, Processes, ProcessStats, Routes, and ServiceCredentialBindings — far more than the single V2 summary endpoint.
+6. **Hardcoded token prefix.** `token[7:]` assumes the "bearer " prefix is exactly 7 characters.
+7. **Hardcoded user agent.** `config.UserAgent("cfs-plugin/1.0.9")` is a static string, not derived from plugin metadata.
+8. **`IsSSLDisabled()` not used.** The library calls `config.SkipTLSValidation()` unconditionally, ignoring the host's SSL configuration.
+
+### Key Insight for the RFC
+
+The Rabobank library validates that a **guest-side transitional wrapper requires zero host changes**. The library:
+- Wraps the existing `plugin.CliConnection` without modifying it
+- Calls `plugin.Start()` — the standard host entry point
+- Works with the unmodified CF CLI host (any version)
+- Allows incremental adoption by consumer plugins
+
+However, the V2-to-V3 impedance mismatch (caveats 1–5) shows that reimplementing V2-shaped domain methods via V3 is lossy and inefficient. This reinforces the RFC's design decision: the new interface should **not** carry forward V2 domain methods. Instead, plugins should use go-cfclient (or equivalent) directly for domain operations, accessing V3 data in its native shape.
+
+---
+
 ## Implications for the RFC
 
 1. **The minimal core contract (`AccessToken`, `ApiEndpoint`, `IsSSLDisabled`, `GetCurrentOrg`, `GetCurrentSpace`, `Username`, `IsLoggedIn`, `HasSpace`, `HasOrganization`, `HasAPIEndpoint`) covers 100% of actively maintained plugins** that use the plugin API for context/auth.
