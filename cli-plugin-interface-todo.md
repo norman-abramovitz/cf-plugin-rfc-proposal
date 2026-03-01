@@ -7,16 +7,16 @@ standalone, and maintainable plugin interface.
 ## Current State
 
 The plugin interface lives in `plugin/` and `plugin/models/` within the CLI repo.
-A key finding from the code analysis: **the plugin-side code is already cleanly
-separated from CLI internals** — the `plugin/`, `plugin/models/` packages have
+A key finding from the code analysis: **the guest-side code is already cleanly
+separated from host internals** — the `plugin/`, `plugin/models/` packages have
 zero imports from `cf/`, `command/`, `actor/`, or any external dependency. The
 only dependencies are Go standard library (`net/rpc`, `time`, `fmt`, `os`).
 
-The coupling exists entirely on the **CLI's RPC server side** (`plugin/rpc/`),
+The coupling exists entirely on the **host's RPC server side** (`plugin/rpc/`),
 which depends heavily on `cf/api`, `cf/commandregistry`, `cf/configuration/coreconfig`,
 and `cf/terminal`.
 
-### Files that form the plugin-side surface (~600 lines, stdlib only)
+### Files that form the guest-side surface (~600 lines, stdlib only)
 
 | File | Contents |
 |---|---|
@@ -25,7 +25,7 @@ and `cf/terminal`.
 | `plugin/plugin_shim.go` | `Start()`, `MinCliVersionStr()`, metadata exchange |
 | `plugin/models/*.go` (13 files) | All model types (`GetAppModel`, `Organization`, `Space`, etc.) — only import is `time` |
 
-### Files that stay in the CLI (deeply coupled to internals)
+### Files that stay in the host (deeply coupled to internals)
 
 | File | Depends On |
 |---|---|
@@ -75,7 +75,7 @@ and `cf/terminal`.
 
 - [ ] Create a new repository (e.g., `code.cloudfoundry.org/cli-plugin-interface` or under a `v2` path)
 - [ ] The module MUST have zero external dependencies — only Go standard library
-- [ ] Copy the clean plugin-side files:
+- [ ] Copy the clean guest-side files:
   - `plugin/plugin.go` → interface definitions (`Plugin`, `CliConnection`, metadata types)
   - `plugin/cli_connection.go` → RPC client implementation
   - `plugin/plugin_shim.go` → `Start()` entrypoint and metadata exchange
@@ -239,7 +239,7 @@ These methods work by running arbitrary CLI commands and capturing terminal outp
 - A security concern (arbitrary command execution)
 
 - [ ] Keep functional during deprecation period
-- [ ] Add CLI-side warnings when these methods are used
+- [ ] Add host-side warnings when these methods are used
 - [ ] Remove when deprecated methods are removed
 
 ---
@@ -573,9 +573,9 @@ symlink routing. The plugin interface MUST NOT require this pattern for its own 
 
 1. ~~**`CfClient()` placement**~~ → **Companion package** (`cli-plugin-helpers/cfclient`). Core contract contains only serializable primitives.
 
-2. ~~**RPC protocol versioning**~~ → **Channel abstraction with embedded metadata.** The CLI uses a `PluginChannel` interface (`Send`/`Receive`/`Open`/`Close`) with concrete implementations for `GobTCPChannel` (legacy) and `JsonRpcChannel` (new). Protocol is determined at install time from the `CF_PLUGIN_METADATA:` marker embedded in the plugin binary/script.
+2. ~~**RPC protocol versioning**~~ → **Channel abstraction with embedded metadata.** The host uses a `PluginChannel` interface (`Send`/`Receive`/`Open`/`Close`) with concrete implementations for `GobTCPChannel` (legacy) and `JsonRpcChannel` (new). Protocol is determined at install time from the `CF_PLUGIN_METADATA:` marker embedded in the guest binary/script.
 
-3. ~~**`CliCommand` replacement**~~ → Not carried forward in the new JSON-RPC contract. Plugins use their own clients (go-cfclient, HTTP, gRPC, etc.) for all domain operations. Legacy plugins keep `CliCommand` via the `GobTCPChannel`.
+3. ~~**`CliCommand` replacement**~~ → Not carried forward in the new JSON-RPC contract. Guests use their own clients (go-cfclient, HTTP, gRPC, etc.) for all domain operations. Legacy guests keep `CliCommand` via the `GobTCPChannel`.
 
 ## Open Questions
 
@@ -587,12 +587,12 @@ symlink routing. The plugin interface MUST NOT require this pattern for its own 
 
 4. **Embedded metadata schema:** Define the `CF_PLUGIN_METADATA:` JSON schema formally, including `schema_version` for evolution and all required/optional fields.
 
-5. **Plugin lifecycle events:** Should uninstall/upgrade notifications be JSON-RPC methods? Currently the CLI sends `"CLI-MESSAGE-UNINSTALL"` as an arg to the plugin's `Run` method.
+5. **Plugin lifecycle events:** Should uninstall/upgrade notifications be JSON-RPC methods? Currently the host sends `"CLI-MESSAGE-UNINSTALL"` as an arg to the guest's `Run` method.
 
 6. **Plugin configuration write access:** cf-targets-plugin bypasses the plugin API because there's no way to set/restore CLI configuration. Should the new interface provide `SetTarget(org, space)` or similar?
 
 7. **Plugin-to-plugin communication:** No plugin currently depends on another plugin, but should the interface support this?
 
-8. **Connection info passing:** How to pass TCP port and protocol to new-protocol plugins — environment variables (`CF_PLUGIN_PORT`, `CF_PLUGIN_PROTOCOL`) vs. other mechanism.
+8. **Connection info passing:** How to pass TCP port and protocol to new-protocol guests — environment variables (`CF_PLUGIN_PORT`, `CF_PLUGIN_PROTOCOL`) vs. other mechanism.
 
 9. **Message serialization format:** Does the serialization format need to be fixed to JSON? The channel abstraction decouples transport from serialization — alternative formats like MessagePack, CBOR, or Protobuf could be supported alongside JSON-RPC. The `CF_PLUGIN_METADATA:` marker could declare the preferred format (e.g., `"serialization":"json"` or `"serialization":"msgpack"`). JSON is the most universally accessible, but binary formats offer better performance for high-volume data exchange.

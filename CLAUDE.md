@@ -16,21 +16,25 @@ This repository contains an RFC proposal to modernize the Cloud Foundry CLI plug
 | `TODO.md` | High-level work item tracker — research, decisions, stakeholder review, reference implementation, community process. |
 | `README.md` | Repository introduction and document links. |
 
+## Terminology
+
+The RFC uses **Host** (the CF CLI process) and **Guest** (the plugin process) to distinguish the two sides of the plugin interface. The host launches the guest, provides authentication and context, and manages the plugin lifecycle. The guest registers with the host, receives commands, and performs its work.
+
 ## Key Architectural Decisions
 
 These decisions are final and documented in the RFC. Do not contradict them:
 
-1. **CfClient() is a companion package**, not part of the core contract. The core contract (`PluginContext`) provides only serializable primitives (strings, bools). A separate `cli-plugin-helpers/cfclient` package wraps go-cfclient for Go plugins.
+1. **CfClient() is a companion package**, not part of the core contract. The core contract (`PluginContext`) provides only serializable primitives (strings, bools). A separate `cli-plugin-helpers/cfclient` package wraps go-cfclient for Go guests.
 
-2. **Channel abstraction** for CLI-plugin communication. The `PluginChannel` interface (`Send`/`Receive`/`Open`/`Close`) hides the wire protocol. Two implementations: `GobTCPChannel` (legacy net/rpc backward compat) and `JsonRpcChannel` (new polyglot).
+2. **Channel abstraction** for host-guest communication. The `PluginChannel` interface (`Send`/`Receive`/`Open`/`Close`) hides the wire protocol. Two implementations: `GobTCPChannel` (legacy net/rpc backward compat) and `JsonRpcChannel` (new polyglot).
 
-3. **JSON-RPC 2.0** is the message format for new-protocol plugins. stdout/stderr remain available for plugin user output. The protocol uses a separate TCP transport.
+3. **JSON-RPC 2.0** is the message format for new-protocol guests. stdout/stderr remain available for guest user output. The protocol uses a separate TCP transport.
 
-4. **Embedded `CF_PLUGIN_METADATA:` marker** for install-time metadata extraction. The CLI scans the plugin binary/script for this marker without executing it. Absence of marker = legacy Go plugin (falls back to exec + gob/net/rpc).
+4. **Embedded `CF_PLUGIN_METADATA:` marker** for install-time metadata extraction. The host scans the guest binary/script for this marker without executing it. Absence of marker = legacy Go guest (falls back to exec + gob/net/rpc).
 
-5. **`CliCommand`/`CliCommandWithoutTerminalOutput` are legacy-only**. Not carried forward in the new JSON-RPC contract. Plugins use their own clients for all domain operations.
+5. **`CliCommand`/`CliCommandWithoutTerminalOutput` are legacy-only**. Not carried forward in the new JSON-RPC contract. Guests use their own clients for all domain operations.
 
-6. **Polyglot support is enabled by design**. The embedded marker + JSON-RPC approach allows plugins in any language (Python, Perl, Java, etc.).
+6. **Polyglot support is enabled by design**. The embedded marker + JSON-RPC approach allows guests in any language (Python, Perl, Java, etc.).
 
 ## Open Decisions
 
@@ -69,7 +73,7 @@ These sibling repositories under `/Users/norm/Projects/CloudFoundry/` contain th
 - `cf-cli/` — The CF CLI source (`cloudfoundry/cli`). Key paths:
   - `plugin/plugin.go` — Current `Plugin`, `CliConnection`, `VersionType`, `PluginMetadata`, `Command`, `Usage` interfaces
   - `plugin/cli_connection.go` — Current RPC client (dials TCP per call via gob)
-  - `plugin/rpc/cli_rpc_server.go` — CLI-side RPC server (`CliRpcService`, `CliRpcCmd`, all config-derived methods)
+  - `plugin/rpc/cli_rpc_server.go` — Host-side RPC server (`CliRpcService`, `CliRpcCmd`, all config-derived methods)
   - `plugin/rpc/run_plugin.go` — Plugin launch (`exec.Command(path, port, args...)`)
   - `command/common/install_plugin_command.go` — Install flow
   - `command/plugin/shared/rpc.go` — `GetMetadata()` via `SendMetadata` arg
