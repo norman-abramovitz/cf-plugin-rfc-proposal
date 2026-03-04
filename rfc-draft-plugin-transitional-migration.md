@@ -806,39 +806,80 @@ The Rabobank README lists several caveats. Some of these are **not actually limi
 | No per-app stats in list | **Avoidable cost tradeoff.** | Rabobank omitted stats to avoid N+1 per-process calls. The generated wrapper includes stats calls only if the plugin declares it needs `RunningInstances`. |
 | 11 API calls for `GetApp()` | **Avoidable.** | Rabobank populates every field unconditionally. The generated wrapper makes only the calls needed for declared fields (e.g., 1 call for `Name`+`Guid`+`State`). |
 
-### Consumer Plugin Analysis: Was the Full Reimplementation Necessary?
+### Consumer Plugin Analysis: Historical and Current V2 Usage
 
-The `cf-plugins` library reimplements **10 V2 domain methods** via V3 (`GetApp`, `GetApps`, `GetOrgs`, `GetSpaces`, `GetOrgUsers`, `GetSpaceUsers`, `GetServices`, `GetService`, `GetOrg`, `GetSpace`). Source analysis of all 4 consumer plugins reveals that this was far more work than needed:
+The `cf-plugins` library reimplements **10 V2 domain methods** via V3. To evaluate whether this scope was justified, we analyzed both the current state and the git history of all 4 consumer plugins.
 
-| Plugin | Uses cf-plugins? | V2 Domain Methods Called | Fields Accessed |
+#### Historical V2 Domain Method Usage
+
+| Plugin | V2 Methods Used Historically | Duration | How They Migrated | Key Commits |
+|---|---|---|---|---|
+| scheduler-plugin | `GetServices()`, `GetService()`, `GetApp()` | Feb 2023 – Oct 2025 (2.5 years) | Migrated directly to go-cfclient/v3 — did **not** adopt cf-plugins | First: [`57130bdb`](https://github.com/rabobank/scheduler-plugin/commit/57130bdb), Migration: [`e682b800`](https://github.com/rabobank/scheduler-plugin/commit/e682b800) |
+| credhub-plugin | `GetService()` | Aug 2023 – Oct 2025 (2+ years) | Adopted cf-plugins — **2-line change** in `main.go` | First: [`e5355478`](https://github.com/rabobank/credhub-plugin/commit/e5355478), Migration: [`7cdaded9`](https://github.com/rabobank/credhub-plugin/commit/7cdaded9) |
+| npsb-plugin | None (context methods only, from day one) | N/A | No migration needed | First: [`ef0c3e10`](https://github.com/rabobank/npsb-plugin/commit/ef0c3e10) |
+| idb-plugin | None (built with cf-plugins from the start, Oct 2025) | N/A | Born V3-native via `CfClient()` | First: [`938005ae`](https://github.com/rabobank/idb-plugin/commit/938005ae) |
+
+The cf-plugins library was created **Oct 2, 2025** ([`a0486ef6`](https://github.com/rabobank/cf-plugins/commit/a0486ef6)), with its CliConnection wrapper landing Oct 13 ([`0443494a`](https://github.com/rabobank/cf-plugins/commit/0443494a)) and enhanced `Execute` support Oct 14 ([`dbaad4c8`](https://github.com/rabobank/cf-plugins/commit/dbaad4c8)). The scheduler-plugin's migration commit message is explicit: *"remove dependency on some cliConnection calls since they still require cf v2 api"*. Commit authorship confirms the same developer migrated the scheduler-plugin and then created the cf-plugins library, generalizing the migration pattern for other consumers.
+
+#### The Library Solved a Real Problem
+
+The credhub-plugin migration demonstrates the library's value: a 2-line change (`plugin.Start()` → `plugins.Start()`) transparently replaced V2 RPC-backed domain method calls with V3 API calls. Without the library, credhub-plugin would have needed the kind of larger refactoring the scheduler-plugin did.
+
+#### But the Scope Was Broader Than Needed
+
+Across all 4 consumer plugins, historically and currently, only **3 of 10** reimplemented methods were ever called:
+
+| Reimplemented Method | Ever Called By | Fields Accessed |
+|---|---|---|
+| `GetApp()` | scheduler-plugin (historical, now migrated away) | `.Guid` only |
+| `GetService()` | credhub-plugin (current), scheduler-plugin (historical) | `.Guid`, `.ServiceOffering.Name`, `.LastOperation.State` |
+| `GetServices()` | scheduler-plugin (historical, now migrated away) | `.Name`, `.ServiceOffering.Name` |
+| `GetApps()` | Never called | — |
+| `GetOrg()` | Never called | — |
+| `GetOrgs()` | Never called | — |
+| `GetSpace()` | Never called | — |
+| `GetSpaces()` | Never called | — |
+| `GetOrgUsers()` | Never called | — |
+| `GetSpaceUsers()` | Never called | — |
+
+The library reimplemented 10 methods, but only 3 were ever used — and those 3 accessed a combined total of **5 unique fields**. The remaining 7 reimplementations were speculative, anticipating broader adoption that hasn't materialized.
+
+#### Current State (Post-Migration)
+
+| Plugin | Uses cf-plugins? | V2 Domain Methods Called Now | Fields Accessed Now |
 |---|---|---|---|
 | scheduler-plugin | **No** | None | N/A — uses `go-cfclient/v3` directly |
 | npsb-plugin | **No** | None | N/A — uses direct HTTP with `AccessToken()` |
 | idb-plugin | Yes (`Execute()`) | None | N/A — uses `CfClient()` for V3 access |
 | credhub-plugin | Yes (`Start()`) | **`GetService()` only** | `.Guid`, `.ServiceOffering.Name`, `.LastOperation.State` |
 
-**Key findings:**
+Today, only 1 method is called by 1 plugin, accessing 3 fields.
 
-1. **Only 1 of 10 reimplemented methods is called** by any consumer plugin. `GetService()` is called by credhub-plugin; the other 9 reimplementations (`GetApp`, `GetApps`, `GetOrgs`, `GetSpaces`, `GetOrgUsers`, `GetSpaceUsers`, `GetServices`, `GetOrg`, `GetSpace`) are unused.
+#### What the Generated Wrapper Approach Would Have Produced
 
-2. **Only 3 fields are accessed** from that single method call. Rabobank's `GetService()` reimplementation populates every field in `GetService_Model` — but credhub-plugin reads only `Guid`, `ServiceOffering.Name`, and `LastOperation.State`.
-
-3. **2 of 4 consumer plugins don't use the library at all.** scheduler-plugin and npsb-plugin import the standard `plugin.Start()` and use their own `go-cfclient/v3` or direct HTTP for CAPI access.
-
-4. **idb-plugin uses `Execute()` for `CfClient()` only** — it calls V3 APIs directly and never touches any reimplemented V2 method.
-
-**What the generated wrapper approach would produce for credhub-plugin:**
+For the scheduler-plugin's historical usage:
 
 ```yaml
-# credhub-plugin/cf-plugin-migrate.yml
+methods:
+  GetApp:
+    fields: [Guid]
+  GetService:
+    fields: [Guid, ServiceOffering.Name]
+  GetServices:
+    fields: [Name, ServiceOffering.Name]
+```
+
+For credhub-plugin's current usage:
+
+```yaml
 methods:
   GetService:
     fields: [Guid, ServiceOffering.Name, LastOperation.State]
 ```
 
-This would generate a wrapper making **2 V3 API calls** (`ServiceInstances.Single()` + `ServicePlans.Get()`) instead of Rabobank's full reimplementation. The remaining 9 V2 methods would not be reimplemented at all.
+Each would generate minimal wrappers with 1–2 V3 API calls per method, instead of the library's comprehensive reimplementation. The 7 unused methods would never have been written.
 
-**This validates the generated wrapper approach:** build only what you use, not a complete V2-over-V3 compatibility layer. The Rabobank library spent significant implementation effort on methods that no consumer plugin calls.
+**Takeaway:** The cf-plugins library was a valid response to a real migration pressure, and the `plugins.Start()` pattern (transparent drop-in) was an elegant design. But the all-or-nothing reimplementation strategy — building every V2 method before knowing which ones consumers need — is exactly the waste the generated wrapper approach avoids. Build only what you use.
 
 ### Implementation Bugs to Avoid
 
