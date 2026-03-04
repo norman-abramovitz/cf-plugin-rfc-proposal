@@ -61,7 +61,7 @@
 - [ ] Implement `cf-plugin-migrate` generator tool (field→API-call mapping, Go source output)
 - [ ] Document token lifecycle pattern (`config.TokenProvider()` for long-running plugins)
 - [ ] Proof-of-concept: Analyze and walk through list-services migration (Tier 1: simple)
-- [ ] Proof-of-concept: Analyze and walk through OCF Scheduler migration (Tier 2: moderate)
+- [x] Proof-of-concept: Analyze and walk through OCF Scheduler migration (Tier 2: moderate) — see [transitional RFC worked example](rfc-draft-plugin-transitional-migration.md#worked-example-ocf-scheduler-plugin)
 - [ ] Proof-of-concept: Analyze and walk through metric-registrar migration (Tier 3: complex)
 
 ## Reference Implementation
