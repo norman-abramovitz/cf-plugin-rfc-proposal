@@ -656,6 +656,8 @@ _, err := cfClient.RouteDestinations.Add(ctx, routeGUID, client.RouteDestination
 
 This is the kind of migration that a generated wrapper **cannot solve** — it requires understanding the V3 domain model. The recommended approach is to rewrite `ports/ports.go` using go-cfclient's `Routes` and `RouteDestinations` resources directly.
 
+> **TODO:** The V2 ports → V3 route destinations migration deserves deeper analysis. Key open questions: How do route destinations interact with internal routes (used by metric-registrar for metrics endpoint exposure)? Does the `cf create-route --internal` + destination model fully replace the V2 ports array for internal service-to-service communication? Are there other plugins or CF features that depend on the V2 ports model? This analysis should be completed before the metric-registrar migration guide is finalized.
+
 **CLI command delegation (unchanged in both phases):**
 
 The four delegated CLI commands (`create-user-provided-service`, `bind-service`, `unbind-service`, `delete-service`) continue to use `CliCommandWithoutTerminalOutput`. These are multi-step workflow operations that the CLI manages internally. They can be replaced with go-cfclient calls as a future optimization, but they work correctly as-is and do not depend on V2 endpoints.
@@ -803,6 +805,40 @@ The Rabobank README lists several caveats. Some of these are **not actually limi
 | `IsAdmin` always false | **Avoidable cost tradeoff.** | Rabobank skipped the UAA role query to reduce API calls. The [generated wrapper](#alternative-generated-v2-compatibility-wrappers) includes the query only if the plugin declares it needs `IsAdmin`. |
 | No per-app stats in list | **Avoidable cost tradeoff.** | Rabobank omitted stats to avoid N+1 per-process calls. The generated wrapper includes stats calls only if the plugin declares it needs `RunningInstances`. |
 | 11 API calls for `GetApp()` | **Avoidable.** | Rabobank populates every field unconditionally. The generated wrapper makes only the calls needed for declared fields (e.g., 1 call for `Name`+`Guid`+`State`). |
+
+### Consumer Plugin Analysis: Was the Full Reimplementation Necessary?
+
+The `cf-plugins` library reimplements **10 V2 domain methods** via V3 (`GetApp`, `GetApps`, `GetOrgs`, `GetSpaces`, `GetOrgUsers`, `GetSpaceUsers`, `GetServices`, `GetService`, `GetOrg`, `GetSpace`). Source analysis of all 4 consumer plugins reveals that this was far more work than needed:
+
+| Plugin | Uses cf-plugins? | V2 Domain Methods Called | Fields Accessed |
+|---|---|---|---|
+| scheduler-plugin | **No** | None | N/A — uses `go-cfclient/v3` directly |
+| npsb-plugin | **No** | None | N/A — uses direct HTTP with `AccessToken()` |
+| idb-plugin | Yes (`Execute()`) | None | N/A — uses `CfClient()` for V3 access |
+| credhub-plugin | Yes (`Start()`) | **`GetService()` only** | `.Guid`, `.ServiceOffering.Name`, `.LastOperation.State` |
+
+**Key findings:**
+
+1. **Only 1 of 10 reimplemented methods is called** by any consumer plugin. `GetService()` is called by credhub-plugin; the other 9 reimplementations (`GetApp`, `GetApps`, `GetOrgs`, `GetSpaces`, `GetOrgUsers`, `GetSpaceUsers`, `GetServices`, `GetOrg`, `GetSpace`) are unused.
+
+2. **Only 3 fields are accessed** from that single method call. Rabobank's `GetService()` reimplementation populates every field in `GetService_Model` — but credhub-plugin reads only `Guid`, `ServiceOffering.Name`, and `LastOperation.State`.
+
+3. **2 of 4 consumer plugins don't use the library at all.** scheduler-plugin and npsb-plugin import the standard `plugin.Start()` and use their own `go-cfclient/v3` or direct HTTP for CAPI access.
+
+4. **idb-plugin uses `Execute()` for `CfClient()` only** — it calls V3 APIs directly and never touches any reimplemented V2 method.
+
+**What the generated wrapper approach would produce for credhub-plugin:**
+
+```yaml
+# credhub-plugin/cf-plugin-migrate.yml
+methods:
+  GetService:
+    fields: [Guid, ServiceOffering.Name, LastOperation.State]
+```
+
+This would generate a wrapper making **2 V3 API calls** (`ServiceInstances.Single()` + `ServicePlans.Get()`) instead of Rabobank's full reimplementation. The remaining 9 V2 methods would not be reimplemented at all.
+
+**This validates the generated wrapper approach:** build only what you use, not a complete V2-over-V3 compatibility layer. The Rabobank library spent significant implementation effort on methods that no consumer plugin calls.
 
 ### Implementation Bugs to Avoid
 

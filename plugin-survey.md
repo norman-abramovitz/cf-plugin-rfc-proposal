@@ -691,6 +691,8 @@ The Rabobank library validates that a **guest-side transitional wrapper requires
 
 The V2-to-V3 data shape differences (caveats 1–5) are not inherent limitations — they are resolvable when the developer declares which fields they need. The [generated wrapper approach](rfc-draft-plugin-transitional-migration.md#alternative-generated-v2-compatibility-wrappers) eliminates the all-or-nothing tradeoff by producing minimal wrappers that populate only requested fields with the minimum V3 API calls required.
 
+**Consumer plugin field analysis** confirms this: of the 10 V2 domain methods the library reimplements, only **1 method** (`GetService`) is called by **1 consumer** (credhub-plugin), accessing just **3 fields** (`.Guid`, `.ServiceOffering.Name`, `.LastOperation.State`). The other 3 consumer plugins use zero reimplemented methods — scheduler-plugin and npsb-plugin don't use the library at all, and idb-plugin uses only `CfClient()` for direct V3 access. See [full analysis](rfc-draft-plugin-transitional-migration.md#consumer-plugin-analysis-was-the-full-reimplementation-necessary).
+
 ---
 
 ## Implications for the RFC
