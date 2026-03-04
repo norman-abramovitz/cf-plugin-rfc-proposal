@@ -54,6 +54,16 @@
 - [ ] Incorporate feedback from @parttimenerd (cf-java-plugin) on dependency updates
 - [ ] Review migration timeline (Phases 1–4) for feasibility with CLI team
 
+## Transitional Migration (Phase 0)
+
+- [ ] Document go-cfclient/v3 minimum alpha version and CF API version floor
+- [ ] Define `cf-plugin-migrate.yml` YAML schema for generated V2 compatibility wrappers
+- [ ] Implement `cf-plugin-migrate` generator tool (field→API-call mapping, Go source output)
+- [ ] Document token lifecycle pattern (`config.TokenProvider()` for long-running plugins)
+- [ ] Proof-of-concept: Analyze and walk through list-services migration (Tier 1: simple)
+- [ ] Proof-of-concept: Analyze and walk through OCF Scheduler migration (Tier 2: moderate)
+- [ ] Proof-of-concept: Analyze and walk through metric-registrar migration (Tier 3: complex)
+
 ## Reference Implementation
 
 - [ ] Create a standalone Go module for the new plugin interface

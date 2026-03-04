@@ -412,6 +412,104 @@ The Rabobank README lists several caveats. Some of these are **not actually limi
 
 3. **Do not hardcode user agent strings.** Rabobank uses `config.UserAgent("cfs-plugin/1.0.9")`. The companion package SHOULD derive the user agent from the plugin's metadata (name and version).
 
+## Implementation Checklist
+
+The migration guide above describes the *what*. This section captures the concrete work needed to make the transitional approach production-ready.
+
+### Dependency Management
+
+- **go-cfclient/v3 version guidance.** The library is still at alpha (surveyed plugins use alpha.9 through alpha.19). The transitional RFC SHOULD recommend a minimum alpha version and document any breaking changes between alphas.
+- **CLI SDK version pinning.** Most plugins import `code.cloudfoundry.org/cli v7.1.0+incompatible`; a few use `code.cloudfoundry.org/cli/v8`. The transitional approach does not change this — both work.
+- **CF API version floor.** go-cfclient/v3 requires CAPI V3 endpoints. The minimum CAPI version that supports all V3 resources used by the generated wrappers SHOULD be documented.
+
+### Build System Integration
+
+- **`//go:generate` directive** for the generated V2 compatibility wrappers. Plugins add a single line (e.g., `//go:generate cf-plugin-migrate generate`) to trigger regeneration.
+- **Makefile target** (e.g., `make generate`) for plugins that use Make-based builds.
+- **Generated file placement.** The generated file SHOULD live alongside the plugin source (e.g., `v2compat_generated.go`) and SHOULD be checked into version control so that `go install` works without the generator tool.
+
+### Test Migration
+
+- **Existing mocks survive.** Tests that mock `plugin.CliConnection` continue to work for context methods (`AccessToken`, `GetCurrentSpace`, etc.).
+- **New domain tests mock go-cfclient.** Plugins that switch to go-cfclient V3 for domain operations need either a `*httptest.Server` or a mock client. go-cfclient provides `fake.Client` in its test package.
+- **Generated wrapper tests.** The generator SHOULD produce a companion `_test.go` file with table-driven tests that verify correct field population against a test server.
+
+### Token Lifecycle
+
+The `AccessToken()` method returns a *snapshot* token — go-cfclient does not get a refresh token. For short-lived operations this is fine, but long-running plugins risk token expiry.
+
+**Recommended pattern:** Pass a token provider function instead of a static token:
+
+```go
+func tokenProvider(conn plugin.CliConnection) func() (string, error) {
+    return func() (string, error) {
+        return conn.AccessToken()
+    }
+}
+```
+
+go-cfclient's `config.TokenProvider()` option accepts this pattern, re-fetching from the host's RPC each time the client needs a token. This is how the App Autoscaler plugin's token expiry pain point SHOULD be resolved.
+
+### `cf-plugin-migrate` Generator Tool
+
+The generated V2 compatibility wrapper approach requires a code generator:
+
+- **YAML schema** for the `cf-plugin-migrate.yml` configuration (methods, fields, output path)
+- **Generator implementation** that reads the config, maps fields to V3 API calls, and emits Go source
+- **Packaging** — standalone CLI tool, installable via `go install`. Proposed location: `code.cloudfoundry.org/cli-plugin-helpers/cmd/cf-plugin-migrate`
+- **Field-to-API-call mapping** maintained as a data file in the generator, updatable as go-cfclient evolves
+
+### Error Handling at the Boundary
+
+The transitional wrapper sits between the host's RPC interface and the V3 API. Both sides can fail:
+
+| Failure | Source | Recommended Handling |
+|---|---|---|
+| Empty API endpoint | `ApiEndpoint()` returns `""` | Fail fast: `"no API target — run 'cf api' first"` |
+| Empty access token | `AccessToken()` returns `""` | Fail fast: `"not logged in — run 'cf login' first"` |
+| Token expired during V3 call | go-cfclient returns 401 | Use `config.TokenProvider()` to re-fetch from host |
+| V3 endpoint not available | go-cfclient returns 404 | Report minimum CAPI version required |
+| Host RPC disconnected | `CliConnection` method returns error | Fail with context: the host (CLI) may have exited |
+
+### Backward Compatibility
+
+- **CLI version compatibility.** The transitional approach works with any CF CLI that implements `plugin.CliConnection` (v6.16+, v7, v8, v9). No host changes are required.
+- **CAPI version compatibility.** go-cfclient/v3 requires CAPI V3 endpoints. Foundations running CF API v3.x (CF Deployment 1.x+) are supported. The generated wrappers SHOULD document the minimum CAPI version per V3 resource used.
+
+## Proof-of-Concept Candidates
+
+To validate the transitional approach, three plugins from the [plugin survey](plugin-survey.md) represent increasing levels of migration complexity:
+
+### Tier 1: Simple — list-services
+
+- **V2 methods used:** `GetApp()` — for GUID resolution only
+- **Fields consumed:** `Guid` only (1 field → 1 V3 API call)
+- **Migration:** Replace `conn.GetApp(name)` with `cfClient.Applications.Single(ctx, opts)`, read `.GUID` — or generate a wrapper that returns `GetAppModel{Guid: app.GUID}`
+- **Why:** Simplest possible case. Validates the end-to-end flow with minimal risk.
+
+### Tier 2: Moderate — OCF Scheduler
+
+- **V2 methods used:** `GetApp()`, `GetApps()`
+- **Fields consumed:** `Name`, `Guid`, `State` (3 fields → 1 V3 API call each)
+- **Migration:** Two methods to replace, both using only core app fields available from a single `Applications` call
+- **Why:** Actively maintained, representative of the common pattern. Already uses direct HTTP for scheduler operations — only the app lookup needs migration.
+
+### Tier 3: Complex — metric-registrar
+
+- **V2 methods used:** `GetApp()`, `GetApps()`, `GetServices()`
+- **Additional V2 dependency:** `cf curl /v2/user_provided_service_instances`, `/v2/apps/{guid}`
+- **Fields consumed:** Multiple fields across app and service models
+- **Migration:** Requires both generated wrappers (for V2 model methods) and `cf curl` replacement (for V2 CAPI endpoints). Tests the full migration path.
+- **Why:** Most V2-coupled active plugin. If the transitional approach works here, it works everywhere.
+
+### Secondary Candidates
+
+| Plugin | V2 Methods | Notes |
+|---|---|---|
+| spring-cloud-services | `GetService()`, `GetApps()` | Clean architecture, good test of service model migration |
+| stack-auditor | `GetOrgs()` + `cf curl /v2/...` | Tests migration of both model methods and V2 curl calls |
+| service-instance-logs | `GetService()` | V2 chain traversal (service → plan → service offering) — complex V3 mapping |
+
 ## Relationship to the V3 Plugin Interface RFC
 
 This transitional approach is **Phase 0** — work that plugin developers can do immediately, before any host changes ship. The V3 RFC migration phases build on top of this:
