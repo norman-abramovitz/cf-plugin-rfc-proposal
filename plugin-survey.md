@@ -665,16 +665,21 @@ Only 2 of 4 consumer plugins actually adopted the library, demonstrating that mi
 
 ### Caveats and Limitations
 
-The Rabobank README documents several caveats arising from V2-to-V3 impedance mismatch:
+The Rabobank README documents several caveats. Items 1–4 are **implementation choices**, not inherent limitations — they arose because Rabobank chose an all-or-nothing approach that always populates every field. The [transitional RFC's generated wrapper approach](rfc-draft-plugin-transitional-migration.md#alternative-generated-v2-compatibility-wrappers) resolves these by only populating the fields a plugin declares it needs, making the additional API calls only when requested.
 
-1. **`IsAdmin` always false.** Organization/space user queries set `IsAdmin` to `false` to avoid querying UAA for role checks.
-2. **Single buildpack only.** `GetApp()` returns only the first buildpack name (V3 supports multiple buildpacks per droplet).
-3. **Single process type.** The V2 `GetAppModel` cannot represent CF's multi-process model; the library uses the first process type.
-4. **No per-app usage statistics in list.** `GetApps()` omits instance stats because V3 requires per-process API calls for each app.
-5. **11 API calls for `GetApp()`.** The V3-reimplemented `GetApp()` requires calls to Applications, EnvironmentVariables, Packages, Droplets, Stacks, Processes, ProcessStats, Routes, and ServiceCredentialBindings — far more than the single V2 summary endpoint.
-6. **Hardcoded token prefix.** `token[7:]` assumes the "bearer " prefix is exactly 7 characters.
-7. **Hardcoded user agent.** `config.UserAgent("cfs-plugin/1.0.9")` is a static string, not derived from plugin metadata.
-8. **`IsSSLDisabled()` not used.** The library calls `config.SkipTLSValidation()` unconditionally, ignoring the host's SSL configuration.
+**Resolvable with the generated wrapper approach:**
+
+1. **`IsAdmin` always false.** Rabobank skips UAA role queries to reduce API calls. Resolvable: if a plugin declares it needs `IsAdmin`, the generator includes a UAA roles query (1 additional call). If not, the field stays zero-valued.
+2. **Single buildpack only.** Rabobank returns only the first buildpack name. Resolvable: V2's `BuildpackUrl` was always a single string — existing plugins are coded for that. The generator populates from the first lifecycle buildpack, which matches what V2 returned.
+3. **Single process type.** Rabobank uses the first process type. Resolvable: V2 only ever returned one process worth of data (`Instances`, `Memory`, `DiskQuota`). The generator populates from the `web` process type (the V2 default). Plugins needing multi-process data should use V3 types directly.
+4. **No per-app usage statistics in list.** Rabobank omits instance stats from `GetApps()` to avoid N+1 calls. Resolvable: if a plugin declares it needs `RunningInstances`, the generator includes per-process stats calls. The developer explicitly opts into the cost.
+5. **11 API calls for `GetApp()`.** Rabobank populates every field unconditionally. Resolvable: the generated wrapper only makes the calls needed for declared fields. A plugin using only `Name`, `Guid`, and `State` makes 1 API call, not 11.
+
+**Implementation bugs to avoid:**
+
+6. **Hardcoded token prefix.** `token[7:]` assumes the "bearer " prefix is exactly 7 characters. The go-cfclient `config.Token()` function handles this internally — do not strip manually.
+7. **Hardcoded user agent.** `config.UserAgent("cfs-plugin/1.0.9")` is a static string, not derived from plugin metadata. The companion package SHOULD derive the user agent from the plugin's name and version.
+8. **`IsSSLDisabled()` not used.** The library calls `config.SkipTLSValidation()` unconditionally, ignoring the host's SSL configuration. The companion package MUST pass through the host's `IsSSLDisabled()` value.
 
 ### Key Insight for the RFC
 
@@ -684,7 +689,7 @@ The Rabobank library validates that a **guest-side transitional wrapper requires
 - Works with the unmodified CF CLI host (any version)
 - Allows incremental adoption by consumer plugins
 
-However, the V2-to-V3 impedance mismatch (caveats 1–5) shows that reimplementing V2-shaped domain methods via V3 is lossy and inefficient. This reinforces the RFC's design decision: the new interface should **not** carry forward V2 domain methods. Instead, plugins should use go-cfclient (or equivalent) directly for domain operations, accessing V3 data in its native shape.
+The V2-to-V3 data shape differences (caveats 1–5) are not inherent limitations — they are resolvable when the developer declares which fields they need. The [generated wrapper approach](rfc-draft-plugin-transitional-migration.md#alternative-generated-v2-compatibility-wrappers) eliminates the all-or-nothing tradeoff by producing minimal wrappers that populate only requested fields with the minimum V3 API calls required.
 
 ---
 

@@ -380,7 +380,7 @@ func (c *cfConnection) CfClient() *client.Client {
 }
 ```
 
-Note: Unlike the Rabobank library, this companion package does **not** reimplement V2 domain methods via V3. Attempting to fit V3 responses into V2-shaped types is lossy and inefficient (see [Rabobank caveats](plugin-survey.md#caveats-and-limitations)). Plugins SHOULD use go-cfclient directly for domain operations.
+Note: Unlike the Rabobank library, this companion package does **not** reimplement V2 domain methods via V3. Plugins SHOULD either use go-cfclient directly for domain operations, or use the [generated V2 compatibility wrappers](#alternative-generated-v2-compatibility-wrappers) that populate only the fields a plugin declares it needs.
 
 ## Lessons from the Rabobank Implementation
 
@@ -392,15 +392,25 @@ The Rabobank `cf-plugins` library validates this approach but also reveals pitfa
 - **Incremental adoption.** Consumer plugins adopt at their own pace — 2 of 4 Rabobank consumers use the library.
 - **Two migration tiers.** `plugins.Start()` provides transparent V3 reimplementation; `plugins.Execute()` provides direct `CfClient()` access.
 
-### What to Avoid
+### Rabobank Caveats in Context
 
-1. **Do not reimplement all V2 domain method fields via V3.** Rabobank's `GetApp()` requires 11 API calls and cannot represent multi-process apps, multiple buildpacks, or detailed instance stats. The V2 model types are structurally inadequate for V3 data. Plugins SHOULD either use go-cfclient directly and work with V3 resource types, or use the [generated V2 compatibility wrappers](#alternative-generated-v2-compatibility-wrappers) that populate only the fields the plugin actually needs.
+The Rabobank README lists several caveats. Some of these are **not actually limitations** — they are faithful representations of what V2 always provided. V2-era plugins were never coded to expect capabilities that only exist in V3:
 
-2. **Do not strip the token prefix manually.** Rabobank uses `token[7:]` to strip `"bearer "`. The go-cfclient `config.Token()` function handles this internally. Manual stripping is fragile if the prefix format ever changes.
+| Rabobank Caveat | Actually a problem? | Explanation |
+|---|---|---|
+| Single buildpack only | **No.** | V2's `BuildpackUrl` was always a single string. No existing V2 plugin expects multiple buildpacks. The wrapper correctly returns the first buildpack, which is what V2 returned. |
+| Single process type | **No.** | V2 had no concept of multiple process types. `Instances`, `Memory`, and `DiskQuota` always described a single process. The wrapper populates from the `web` process type, matching V2 behavior. Plugins that need multi-process data are V3-aware and should use go-cfclient V3 types directly. |
+| `IsAdmin` always false | **Avoidable cost tradeoff.** | Rabobank skipped the UAA role query to reduce API calls. The [generated wrapper](#alternative-generated-v2-compatibility-wrappers) includes the query only if the plugin declares it needs `IsAdmin`. |
+| No per-app stats in list | **Avoidable cost tradeoff.** | Rabobank omitted stats to avoid N+1 per-process calls. The generated wrapper includes stats calls only if the plugin declares it needs `RunningInstances`. |
+| 11 API calls for `GetApp()` | **Avoidable.** | Rabobank populates every field unconditionally. The generated wrapper makes only the calls needed for declared fields (e.g., 1 call for `Name`+`Guid`+`State`). |
 
-3. **Do not hardcode SSL settings.** Rabobank calls `config.SkipTLSValidation()` unconditionally. The companion package SHOULD pass through the host's `IsSSLDisabled()` value.
+### Implementation Bugs to Avoid
 
-4. **Do not hardcode user agent strings.** Rabobank uses `config.UserAgent("cfs-plugin/1.0.9")`. The companion package SHOULD derive the user agent from the plugin's metadata (name and version).
+1. **Do not strip the token prefix manually.** Rabobank uses `token[7:]` to strip `"bearer "`. The go-cfclient `config.Token()` function handles this internally. Manual stripping is fragile if the prefix format ever changes.
+
+2. **Do not hardcode SSL settings.** Rabobank calls `config.SkipTLSValidation()` unconditionally. The companion package MUST pass through the host's `IsSSLDisabled()` value.
+
+3. **Do not hardcode user agent strings.** Rabobank uses `config.UserAgent("cfs-plugin/1.0.9")`. The companion package SHOULD derive the user agent from the plugin's metadata (name and version).
 
 ## Relationship to the V3 Plugin Interface RFC
 

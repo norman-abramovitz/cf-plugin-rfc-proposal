@@ -43,7 +43,7 @@
 - [ ] Add error handling and edge case guidance (expired tokens, no target, plugin crashes mid-stream)
 - [ ] Decide: How to pass connection info to new-protocol plugins (env vars `CF_PLUGIN_PORT`, `CF_PLUGIN_PROTOCOL` vs. other mechanism)
 - [ ] Decide: Does the message serialization format need to be fixed to JSON? The channel abstraction could support alternative serialization formats (e.g., MessagePack, CBOR, Protobuf) alongside JSON-RPC — the `CF_PLUGIN_METADATA:` marker could declare the preferred format.
-- [ ] Discuss Rabobank transitional wrapper caveats and their implications for the companion package: token prefix handling, SSL pass-through, user agent derivation, V2-to-V3 impedance mismatch (IsAdmin, single process, single buildpack, missing stats). See [plugin survey case study](plugin-survey.md#caveats-and-limitations) and [transitional RFC](rfc-draft-plugin-transitional-migration.md#lessons-from-the-rabobank-implementation).
+- [x] Discuss Rabobank transitional wrapper caveats → V2-to-V3 data shape differences (IsAdmin, single process, single buildpack, missing stats) resolved by generated wrapper approach. Implementation bugs (token prefix, SSL, user agent) documented. See [transitional RFC](rfc-draft-plugin-transitional-migration.md#lessons-from-the-rabobank-implementation).
 
 ### Stakeholder Review
 
