@@ -282,6 +282,8 @@ The generator uses a field dependency map to determine the minimum V3 calls need
 
 Compare this to Rabobank's approach which always makes 10 V3 API calls (plus 1 host RPC call for `GetCurrentSpace()`) to populate every field, regardless of what the plugin uses.
 
+The generator also leverages CAPI V3 `include` and `fields` parameters to collapse multiple calls into one. For example, `GetService` drops from 3 calls (Rabobank) to **1 call** using `fields[service_plan]` and `fields[service_plan.service_offering]`. See [Generator Optimization Summary](#generator-optimization-summary) for the full comparison.
+
 #### Automated Audit: `cf-plugin-migrate scan`
 
 Writing the YAML configuration by hand requires tracing every V2 domain method call and every field access — the same analysis we performed manually for the [OCF Scheduler](#worked-example-ocf-scheduler-plugin) and [metric-registrar](#worked-example-metric-registrar-plugin-complex-migration) worked examples. A `scan` subcommand automates this using Go's `go/ast` package.
@@ -1185,7 +1187,37 @@ Methods not in this table (`GetCurrentOrg`, `GetCurrentSpace`, `AccessToken`, `A
 
 This section provides the field-to-API-call mapping the `generate` subcommand uses as its knowledge base. Fields are organized into **dependency groups** — sets of fields that share the same V3 API call. The generator adds a V3 call only when at least one field from that group is requested.
 
-The mapping is derived from first-principles analysis of the [V2 plugin model types](https://github.com/cloudfoundry/cli/tree/main/plugin/models) and the [CAPI V3 API documentation](https://v3-apidocs.cloudfoundry.org), validated against the [Rabobank implementation](https://github.com/rabobank/cf-plugins/blob/main/connection.go). See [V2 Plugin Model Struct Reference](#v2-plugin-model-struct-reference) for the complete Go type definitions.
+The mapping is derived from first-principles analysis of the [V2 plugin model types](https://github.com/cloudfoundry/cli/tree/main/plugin/models) and the [CAPI V3 API documentation](https://v3-apidocs.cloudfoundry.org), validated against the [Rabobank implementation](https://github.com/rabobank/cf-plugins/blob/main/connection.go) and tested against a live CAPI V3 endpoint (v3.180.0). See [V2 Plugin Model Struct Reference](#v2-plugin-model-struct-reference) for the complete Go type definitions.
+
+##### V3 API `include` and `fields` Parameter Availability
+
+The CAPI V3 API supports two mechanisms for retrieving related resources in a single call, reducing the need for per-item requests:
+
+- **`include`** — returns full related resources in an `included` section of the response
+- **`fields`** — returns selected fields of related resources (supports nested paths like `service_plan.service_offering`)
+
+Availability was verified against CAPI V3 v3.180.0:
+
+| Endpoint | `include` Values | `fields` Resources |
+|---|---|---|
+| `/v3/apps` | `space`, `org`, `space.organization` | — |
+| `/v3/routes` | `domain`, `space`, `space.organization` | — |
+| `/v3/spaces` | `org`, `organization` | — |
+| `/v3/roles` | `user`, `organization`, `space` | — |
+| `/v3/service_credential_bindings` | `app`, `service_instance` | — |
+| `/v3/service_instances` | — | `service_plan`, `service_plan.service_offering`, `service_plan.service_offering.service_broker` |
+| `/v3/service_plans` | `service_offering` | `service_offering.service_broker` |
+| `/v3/service_offerings` | — | `service_broker` |
+| `/v3/processes` | — | — |
+| `/v3/domains` | — | — |
+| `/v3/droplets` | — | — |
+| `/v3/packages` | — | — |
+| `/v3/stacks` | — | — |
+| `/v3/security_groups` | — | — |
+| `/v3/organization_quotas` | — | — |
+| `/v3/space_quotas` | — | — |
+
+The generator SHOULD use `include` and `fields` parameters where available to minimize API calls. This is particularly impactful for service-related models where Rabobank makes N+1 calls that `fields` can eliminate entirely.
 
 ##### GetAppModel — `GetApp(appName string)`
 
@@ -1220,18 +1252,20 @@ The most complex model. Rabobank populates all fields with 10 V3 API calls. The 
 | | | `Stack.Description` | `.Description` | Pointer |
 | **6: Package** | `Packages.ListForAppAll(appGUID)` | `PackageUpdatedAt` | last `.UpdatedAt` | Assumes latest package is last in list |
 | **7: Env** | `Applications.GetEnvironmentVariables(appGUID)` | `EnvironmentVars` | (full map) | |
-| **8: Routes** | `Routes.ListForApp(appGUID)` | `Routes[].Guid` | `.GUID` | |
+| **8: Routes** | `Routes.ListForApp(appGUID, include=domain)` | `Routes[].Guid` | `.GUID` | `include=domain` eliminates separate domain lookups |
 | | | `Routes[].Host` | `.Host` | |
 | | | `Routes[].Path` | `.Path` | |
 | | | `Routes[].Port` | `.Port` | Pointer. V3 route port ≠ V2 app port — see [ports discussion](#structural-change-portsportsgo) |
 | | | `Routes[].Domain.Guid` | `.Relationships.Domain.Data.GUID` | |
-| | | `Routes[].Domain.Name` | computed from `.URL` | Rabobank parses host prefix from URL; alternatively call `Domains.Get()` |
-| **9: Services** | `ServiceCredentialBindings.ListIncludeServiceInstances(appGUID)` | `Services[].Guid` | (included SI).GUID | Uses `include` parameter — avoids N+1 |
+| | | `Routes[].Domain.Name` | (included Domain).Name | Via `include=domain` — no URL parsing needed |
+| **9: Services** | `ServiceCredentialBindings.List(appGUID, include=service_instance)` | `Services[].Guid` | (included SI).GUID | `include=service_instance` avoids N+1 |
 | | | `Services[].Name` | (included SI).Name | |
 
 **Dependency chain:** Group 3 requires Group 2 (process GUID). Group 5 requires Group 4 (stack name from droplet). All other groups are independent and can be called concurrently.
 
-**Rabobank `include` usage:** Rabobank uses `ListIncludeServiceInstancesAll` for Group 9, fetching service instances alongside bindings in a single call. This is the only `include` optimization in their `GetApp` implementation. The generator SHOULD use `include` parameters where available.
+**`include` optimizations vs Rabobank:**
+- **Group 8 (Routes):** The `/v3/routes` endpoint supports `include=domain`. The generator uses this to get domain names directly from the included resources, eliminating Rabobank's URL-parsing workaround.
+- **Group 9 (Services):** Both the generator and Rabobank use `include=service_instance` on service credential bindings.
 
 ##### GetAppsModel — `GetApps()`
 
@@ -1240,19 +1274,32 @@ The most complex model. Rabobank populates all fields with 10 V3 API calls. The 
 | **1: Apps** | `Applications.ListAll(spaceGUID)` | `Guid` | `.GUID` | Always required |
 | | | `Name` | `.Name` | |
 | | | `State` | `.State` | |
-| **2: Process** | `Processes.ListForApp()` **per app** | `TotalInstances` | `.Instances` | **N+1 problem** |
+| **2: Process** | `Processes.ListForApp()` **per app** | `TotalInstances` | `.Instances` | Per-app call — cost bounded by user permissions |
 | | | `Memory` | `.MemoryInMB` | |
 | | | `DiskQuota` | `.DiskInMB` | |
-| **3: Stats** | `Processes.GetStats()` **per app** | `RunningInstances` | `len(.Stats)` | **N+1 problem** — requires Group 2 |
-| **4: Routes** | `Routes.ListForApp()` **per app** | `Routes[].*` | (see GetAppModel Group 8) | **N+1 problem** |
+| **3: Stats** | `Processes.GetStats()` **per app** | `RunningInstances` | `len(.Stats)` | Per-app call — requires Group 2 |
+| **4: Routes** | `Routes.ListForApp(include=domain)` **per app** | `Routes[].*` | (see GetAppModel Group 8) | Per-app call — `include=domain` for domain names |
 
-**N+1 warning:** Groups 2–4 require per-app API calls. For a space with 50 apps, requesting `TotalInstances` adds 50+ API calls. The V2 CLI populated these from the `/v2/apps` summary endpoint which returned everything in one response — no V3 equivalent exists. The generator SHOULD warn when these fields are requested and suggest using go-cfclient directly with concurrent calls. Rabobank's `GetApps()` only populates Name, Guid, and State (Group 1), avoiding this problem entirely.
+**Per-app call note:** Groups 2–4 require per-app API calls. The V2 CLI populated these from the `/v2/apps` summary endpoint which returned everything in one response — no V3 equivalent exists. However, the actual cost is bounded by user permissions: `ListAll` returns only resources the user can see. A space developer with 5 apps gets 5 extra calls, not 50. The `/v3/processes` and `/v3/routes` endpoints do not support `include` or `fields` parameters, so per-app calls are unavoidable for these fields.
+
+The YAML output from `scan` annotates per-app fields so the developer can make an informed choice:
+
+```yaml
+methods:
+  GetApps:
+    fields: [Guid, Name, State]
+    # Per-app fields (1 API call per app):
+    # TotalInstances, RunningInstances, Memory, DiskQuota
+    # Remove if not needed to reduce API calls.
+```
+
+Rabobank's `GetApps()` only populates Name, Guid, and State (Group 1), avoiding per-app calls entirely.
 
 ##### GetService_Model — `GetService(serviceName string)`
 
 | Group | V3 API Call(s) | V2 Fields | V3 Field Path | Notes |
 |---|---|---|---|---|
-| **1: Instance** | `ServiceInstances.Single(name, spaceGUID)` | `Guid` | `.GUID` | Always required |
+| **1: Instance+Plan+Offering** | `ServiceInstances.Single(name, spaceGUID)` with `fields[service_plan]=name,guid,relationships.service_offering` and `fields[service_plan.service_offering]=name,documentation_url` | `Guid` | `.GUID` | **Single call** — `fields` parameters include plan and offering |
 | | | `Name` | `.Name` | |
 | | | `DashboardUrl` | `.DashboardURL` | Pointer |
 | | | `IsUserProvided` | `.Type == "user-provided"` | |
@@ -1261,32 +1308,30 @@ The most complex model. Rabobank populates all fields with 10 V3 API calls. The 
 | | | `LastOperation.Description` | `.LastOperation.Description` | |
 | | | `LastOperation.CreatedAt` | `.LastOperation.CreatedAt.String()` | |
 | | | `LastOperation.UpdatedAt` | `.LastOperation.UpdatedAt.String()` | |
-| **2: Plan** | `ServicePlans.Get(instance...ServicePlan.Data.GUID)` | `ServicePlan.Name` | `.Name` | |
-| | | `ServicePlan.Guid` | `.GUID` | |
-| **3: Offering** | `ServiceOfferings.Get(plan...ServiceOffering.Data.GUID)` | `ServiceOffering.Name` | `.Name` | Requires Group 2 for offering GUID |
-| | | `ServiceOffering.DocumentationUrl` | `.DocumentationURL` | |
+| | | `ServicePlan.Name` | (included plan).Name | Via `fields[service_plan]` |
+| | | `ServicePlan.Guid` | (included plan).GUID | Via `fields[service_plan]` |
+| | | `ServiceOffering.Name` | (included offering).Name | Via `fields[service_plan.service_offering]` |
+| | | `ServiceOffering.DocumentationUrl` | (included offering).DocumentationURL | Via `fields[service_plan.service_offering]` |
 
-**Dependency chain:** Group 3 requires Group 2 (service offering GUID comes from the plan's relationships).
-
-**Optimization opportunity:** go-cfclient's `ServiceInstances.ListIncludeServicePlansAll()` could eliminate the separate plan GET. Not yet used by Rabobank.
+**Optimization:** The `/v3/service_instances` endpoint supports `fields[service_plan]` and `fields[service_plan.service_offering]`, allowing the instance, plan, and offering to be retrieved in a **single API call**. Rabobank makes 3 separate calls (instance, plan GET, offering GET). This is the most significant optimization the generator can make over the Rabobank approach.
 
 ##### GetServices_Model — `GetServices()`
 
 | Group | V3 API Call(s) | V2 Fields | V3 Field Path | Notes |
 |---|---|---|---|---|
-| **1: Instances** | `ServiceInstances.ListAll(spaceGUID)` | `Guid` | `.GUID` | Always required |
+| **1: Instances+Plans+Offerings** | `ServiceInstances.ListAll(spaceGUID)` with `fields[service_plan]=name,guid` and `fields[service_plan.service_offering]=name` | `Guid` | `.GUID` | **Single call** — `fields` parameters include plans and offerings |
 | | | `Name` | `.Name` | |
 | | | `IsUserProvided` | `.Type == "user-provided"` | |
 | | | `LastOperation.Type` | `.LastOperation.Type` | |
 | | | `LastOperation.State` | `.LastOperation.State` | |
-| **2: Apps** | `ServiceCredentialBindings.ListIncludeApps()` **per instance** | `ApplicationNames` | (included App).Name | Uses `include` — Rabobank pattern |
-| **3: Plan** | `ServicePlans.Get()` **per instance** | `ServicePlan.Name` | `.Name` | N+1 per instance |
-| | | `ServicePlan.Guid` | `.GUID` | |
-| **4: Offering** | `ServiceOfferings.Get()` **per instance** | `Service.Name` | `.Name` | Requires Group 3 |
+| | | `ServicePlan.Name` | (included plan).Name | Via `fields[service_plan]` |
+| | | `ServicePlan.Guid` | (included plan).GUID | Via `fields[service_plan]` |
+| | | `Service.Name` | (included offering).Name | Via `fields[service_plan.service_offering]` |
+| **2: Apps** | `ServiceCredentialBindings.ListAll(include=app)` | `ApplicationNames` | (included App).Name | Single call with `include=app` for all bindings in space |
 
-**N+1 note:** Groups 2–4 require per-instance API calls. Rabobank makes 3 additional calls per service instance (bindings+apps, plan, offering).
+**Optimization:** Using `fields` on the list call, the generator retrieves all service instances with their plans and offerings in a **single call** — eliminating the 2 × N separate GETs that Rabobank makes (one for plan, one for offering, per instance).
 
-**Rabobank `include` usage:** Uses `ListIncludeAppsAll` for Group 2, fetching bound apps alongside bindings. Does not use `include` for plans or offerings — an optimization opportunity.
+For `ApplicationNames`, the generator can make a single `ServiceCredentialBindings.ListAll` call with `include=app` filtering by the space's service instance GUIDs, then group app names by instance. This replaces Rabobank's per-instance binding lookup.
 
 ##### GetOrg_Model — `GetOrg(orgName string)`
 
@@ -1328,22 +1373,22 @@ All groups are independent — no dependency chains.
 
 | Group | V3 API Call(s) | V2 Fields | V3 Field Path | Notes |
 |---|---|---|---|---|
-| **1: Space** | `Spaces.Single(name)` | `Guid` | `.GUID` | Always required |
+| **1: Space+Org** | `Spaces.Single(name, include=organization)` | `Guid` | `.GUID` | Always required. `include=organization` retrieves org in same call. |
 | | | `Name` | `.Name` | |
-| **2: Org** | `Organizations.Get(space...Organization.Data.GUID)` | `Organization.Guid` | `.GUID` | |
-| | | `Organization.Name` | `.Name` | |
-| **3: Apps** | `Applications.ListAll(spaceGUID)` | `Applications[].Guid` | `.GUID` | |
+| | | `Organization.Guid` | (included Org).GUID | Via `include=organization` — no separate org GET |
+| | | `Organization.Name` | (included Org).Name | |
+| **2: Apps** | `Applications.ListAll(spaceGUID)` | `Applications[].Guid` | `.GUID` | |
 | | | `Applications[].Name` | `.Name` | |
-| **4: Services** | `ServiceInstances.ListAll(spaceGUID)` | `ServiceInstances[].Guid` | `.GUID` | |
+| **3: Services** | `ServiceInstances.ListAll(spaceGUID)` | `ServiceInstances[].Guid` | `.GUID` | |
 | | | `ServiceInstances[].Name` | `.Name` | |
-| **5: Domains** | `Domains.ListAll(orgGUID)` | `Domains[].Guid` | `.GUID` | Requires Group 2 for org GUID |
+| **4: Domains** | `Domains.ListAll(orgGUID)` | `Domains[].Guid` | `.GUID` | Org GUID from Group 1's included org |
 | | | `Domains[].Name` | `.Name` | |
 | | | `Domains[].OwningOrganizationGuid` | `.Relationships.Organization.Data.GUID` | |
-| | | `Domains[].Shared` | (computed) | Rabobank sets all to `true` — likely a bug |
-| **6: SecurityGroups** | `SecurityGroups.ListAll(runningSpaceGUID)` | `SecurityGroups[].Guid` | `.GUID` | Filters by running space only |
+| | | `Domains[].Shared` | `.Relationships.Organization.Data == nil` | Rabobank sets all to `true` — incorrect |
+| **5: SecurityGroups** | `SecurityGroups.ListAll(runningSpaceGUID)` | `SecurityGroups[].Guid` | `.GUID` | Filters by running space only |
 | | | `SecurityGroups[].Name` | `.Name` | |
 | | | `SecurityGroups[].Rules` | `.Rules` → JSON marshal/unmarshal | Dynamic structure via `[]map[string]any` |
-| **7: SpaceQuota** | `SpaceQuotas.Get(space...Quota.Data.GUID)` | `SpaceQuota.Guid` | `.GUID` | Only if space has a quota assigned |
+| **6: SpaceQuota** | `SpaceQuotas.Get(space...Quota.Data.GUID)` | `SpaceQuota.Guid` | `.GUID` | Only if space has a quota assigned |
 | | | `SpaceQuota.Name` | `.Name` | |
 | | | `SpaceQuota.MemoryLimit` | `.Apps.TotalMemoryInMB` | Pointer → `int64` |
 | | | `SpaceQuota.InstanceMemoryLimit` | `.Apps.PerProcessMemoryInMB` | Pointer → `int64` |
@@ -1351,7 +1396,7 @@ All groups are independent — no dependency chains.
 | | | `SpaceQuota.ServicesLimit` | `.Services.TotalServiceInstances` | Pointer → `int` |
 | | | `SpaceQuota.NonBasicServicesAllowed` | `.Services.PaidServicesAllowed` | |
 
-**Dependency chain:** Group 5 requires Group 2 (org GUID for domain listing).
+**Optimization:** The `/v3/spaces` endpoint supports `include=organization`, eliminating the separate org GET that Rabobank makes. The org GUID is then available from the included data for the domains lookup in Group 4, removing the dependency chain.
 
 ##### GetSpaces_Model — `GetSpaces()`
 
@@ -1364,7 +1409,7 @@ All groups are independent — no dependency chains.
 
 | Group | V3 API Call(s) | V2 Fields | V3 Field Path | Notes |
 |---|---|---|---|---|
-| **1: Roles+Users** | `Organizations.Single(name)` + `Roles.ListIncludeUsersAll(orgGUID)` | `Guid` | (included User).GUID | Uses `include` — single call for roles+users |
+| **1: Roles+Users** | `Organizations.Single(name)` + `Roles.ListAll(orgGUID, include=user)` | `Guid` | (included User).GUID | `include=user` returns roles and users in one call |
 | | | `Username` | (included User).Username | Pointer |
 | | | `Roles` | `role.Type` aggregated per user | Role types: `organization_user`, `organization_manager`, etc. |
 | | | `IsAdmin` | — | **Not available in V3.** V2 derived this from UAA admin scope. Always `false` in generated wrappers. |
@@ -1375,22 +1420,27 @@ All groups are independent — no dependency chains.
 
 | Group | V3 API Call(s) | V2 Fields | V3 Field Path | Notes |
 |---|---|---|---|---|
-| **1: Roles+Users** | `Organizations.Single(orgName)` + `Spaces.Single(spaceName, orgGUID)` + `Roles.ListIncludeUsersAll(spaceGUID)` | `Guid` | (included User).GUID | Uses `include` |
+| **1: Roles+Users** | `Organizations.Single(orgName)` + `Spaces.Single(spaceName, orgGUID)` + `Roles.ListAll(spaceGUID, include=user)` | `Guid` | (included User).GUID | `include=user` returns roles and users in one call |
 | | | `Username` | (included User).Username | Pointer |
 | | | `Roles` | `role.Type` aggregated per user | Role types: `space_developer`, `space_manager`, etc. |
 | | | `IsAdmin` | — | **Not available in V3.** See GetOrgUsers note. |
 
-##### Rabobank `include` Parameter Usage Summary
+##### Generator Optimization Summary
 
-The Rabobank implementation uses go-cfclient's `include` parameters in three places to reduce API calls:
+The `include` and `fields` parameters available in CAPI V3 significantly reduce API calls compared to Rabobank's approach:
 
-| Method | `include` Call | What It Avoids |
-|---|---|---|
-| `GetApp` (Services) | `ServiceCredentialBindings.ListIncludeServiceInstancesAll` | Separate `ServiceInstances.Get()` per binding |
-| `GetServices` (Apps) | `ServiceCredentialBindings.ListIncludeAppsAll` | Separate `Applications.Get()` per binding |
-| `GetOrgUsers` / `GetSpaceUsers` | `Roles.ListIncludeUsersAll` | Separate `Users.Get()` per role |
+| Method | Rabobank Calls | Generator Calls (all fields) | Key Optimization |
+|---|---|---|---|
+| `GetApp` | 10 | 10 | `include=domain` on routes (eliminates URL parsing) |
+| `GetApps` | 1 (partial) | 1 + per-app | Per-app calls bounded by user permissions |
+| `GetService` | 3 | **1** | `fields[service_plan]` + `fields[service_plan.service_offering]` |
+| `GetServices` | 1 + 3×N | **2** | `fields` on list + single bindings call with `include=app` |
+| `GetOrg` | 5 | 5 | No `include`/`fields` available on these endpoints |
+| `GetSpace` | 7 | **6** | `include=organization` on spaces (eliminates org GET) |
+| `GetOrgUsers` | 2 | 2 | Both use `include=user` |
+| `GetSpaceUsers` | 3 | 3 | Both use `include=user` |
 
-Rabobank does **not** use `include` for service plan → offering resolution (`GetServices`, `GetService`), making 2 separate GET calls per service instance. The generator SHOULD use `include` parameters where go-cfclient supports them.
+The most dramatic improvement is for service-related methods: `GetService` drops from 3 calls to 1, and `GetServices` drops from 1 + 3×N calls to 2 calls regardless of instance count.
 
 ##### Fields Not Available in V3
 
@@ -1398,7 +1448,7 @@ Rabobank does **not** use `include` for service plan → offering resolution (`G
 |---|---|---|
 | `IsAdmin` | `GetOrgUsers_Model`, `GetSpaceUsers_Model` | V2 derived from UAA admin scope; V3 roles are CAPI-only |
 | `DetectedStartCommand` (distinct from `Command`) | `GetAppModel` | V3 does not distinguish detected vs explicit start command |
-| `GetAppsModel.Routes[].Domain.OwningOrganizationGuid` | `GetAppsModel` | Available but requires additional `Domains.Get()` per route domain — N+1 |
+| `GetAppsModel.Routes[].Domain.OwningOrganizationGuid` | `GetAppsModel` | Available but requires additional `Domains.Get()` per route domain |
 | `GetAppsModel.Routes[].Domain.Shared` | `GetAppsModel` | Same as above |
 
 #### V2 Plugin Model Struct Reference

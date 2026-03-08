@@ -153,6 +153,48 @@ If the developer keeps the fields, the generated code includes them with a comme
 | Warn and skip (refuse to generate) | Too restrictive; the developer may genuinely need these fields and the cost is bounded by user permissions |
 | Generate concurrent calls (`errgroup`) | Adds significant complexity to generated code; harder to debug; sequential calls are adequate for the typical permission-scoped result set |
 
+## Decision 6: Use V3 `include` and `fields` Parameters to Minimize API Calls
+
+**Decision:** The generator MUST use `include` and `fields` query parameters where the CAPI V3 API supports them, collapsing multiple dependency groups into single calls.
+
+**Rationale:** Testing against a live CAPI V3 endpoint (v3.180.0 at `https://api.sys.adepttech.ca`) revealed that several V3 endpoints support `include` (returns full related resources inline) and `fields` (returns selected fields of related resources, including nested paths). These parameters eliminate the need for per-item follow-up calls in many cases.
+
+**Key optimizations discovered:**
+
+| Method | Without `include`/`fields` | With `include`/`fields` | Savings |
+|---|---|---|---|
+| `GetService` | 3 calls (instance + plan GET + offering GET) | **1 call** with `fields[service_plan]` + `fields[service_plan.service_offering]` | 2 calls eliminated |
+| `GetServices` | 1 + 3×N calls (per-instance plan + offering + bindings) | **2 calls** (list with `fields` + bindings with `include=app`) | 3×N calls → 2 |
+| `GetSpace` | 7 calls (separate org GET) | **6 calls** with `include=organization` on spaces | 1 call eliminated |
+| `GetApp` (Routes) | Routes + URL parsing for domain name | Routes with `include=domain` | Cleaner, no parsing |
+
+**Available `include` and `fields` by endpoint (verified live):**
+
+| Endpoint | `include` | `fields` |
+|---|---|---|
+| `/v3/apps` | `space`, `org`, `space.organization` | — |
+| `/v3/routes` | `domain`, `space`, `space.organization` | — |
+| `/v3/spaces` | `org`, `organization` | — |
+| `/v3/roles` | `user`, `organization`, `space` | — |
+| `/v3/service_credential_bindings` | `app`, `service_instance` | — |
+| `/v3/service_instances` | — | `service_plan`, `service_plan.service_offering`, `service_plan.service_offering.service_broker` |
+| `/v3/service_plans` | `service_offering` | `service_offering.service_broker` |
+| `/v3/service_offerings` | — | `service_broker` |
+| `/v3/processes` | — | — |
+| `/v3/domains` | — | — |
+| `/v3/droplets` | — | — |
+| `/v3/packages` | — | — |
+| `/v3/stacks` | — | — |
+| `/v3/security_groups` | — | — |
+| `/v3/organization_quotas` | — | — |
+| `/v3/space_quotas` | — | — |
+
+**Impact on Decision 2 (dependency chains):** Some dependency chains are eliminated entirely. For example, `GetSpace` previously required a separate org GET (Group 2) before the domains lookup (Group 5) could use the org GUID. With `include=organization`, the org data comes back with the space in Group 1, removing the chain. Similarly, `GetService`'s plan → offering chain collapses into a single call.
+
+**Impact on Decision 5 (per-item calls):** The `include` and `fields` parameters do not help with `GetApps` Groups 2–4 (processes and stats) because `/v3/processes` supports neither `include` nor `fields`. Per-app calls remain unavoidable for those fields, but the cost is bounded by user permissions as previously decided.
+
+**go-cfclient support:** The generator's output uses go-cfclient's typed API. Whether go-cfclient exposes `include` and `fields` as options on its list/get methods needs to be verified during implementation. If go-cfclient does not expose a particular parameter, the generator can fall back to raw HTTP calls or the previous multi-call approach.
+
 ## Summary
 
 | # | Decision | Choice |
@@ -162,11 +204,12 @@ If the developer keeps the fields, the generated code includes them with a comme
 | 3 | Module location | POC in RFC repo, move to `cli-plugin-helpers` later |
 | 4 | Error handling in generated code | Eager return with partial results |
 | 5 | Per-item API calls | Generate the code, annotate cost in YAML |
+| 6 | `include`/`fields` optimization | Use wherever CAPI V3 supports them |
 
 ## Test Environment
 
-- **CF API:** `https://api.sys.adepttech.ca`
-- **Purpose:** Validate generated wrappers against a live CAPI V3 endpoint. Test with real user permissions to verify per-item API call behavior and field mapping correctness.
+- **CF API:** `https://api.sys.adepttech.ca` (CAPI V3 v3.180.0)
+- **Purpose:** Validate generated wrappers against a live CAPI V3 endpoint. Test with real user permissions to verify per-item API call behavior, field mapping correctness, and `include`/`fields` parameter support.
 
 ## References
 
