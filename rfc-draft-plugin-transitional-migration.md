@@ -969,6 +969,15 @@ go-cfclient v3 requires CAPI V3 endpoints. The minimum CF API version depends on
 
 Most actively maintained CF foundations run CAPI 3.100+ (CF Deployment 25+), so the version floor is not a practical concern for current deployments. The generated wrappers SHOULD document the minimum CAPI version per V3 resource used.
 
+### UAA and CredHub
+
+The CAPI V2→V3 transition does not affect UAA or CredHub interfaces. Survey analysis confirms that plugin interaction with these services is minimal and falls outside the plugin interface contract:
+
+- **UAA:** Only 1 of 18 surveyed plugins (html5-apps-repo) calls UAA directly — a `client_credentials` token exchange for service-specific access. All other plugins consume UAA-issued tokens exclusively through the host's `AccessToken()` method.
+- **CredHub:** Only 1 plugin (credhub-plugin) talks to a CredHub service broker API, using CAPI to resolve the broker URL. It does not interact with the CredHub credential store directly.
+
+The core contract's `AccessToken()` covers plugin developer needs. Plugins requiring service-specific tokens or credential store access handle that themselves outside the plugin interface, and those patterns are unaffected by the CAPI V2→V3 migration.
+
 ### Dependency Management
 
 - **CLI SDK version pinning.** Most plugins import `code.cloudfoundry.org/cli v7.1.0+incompatible`; a few use `code.cloudfoundry.org/cli/v8`. The transitional approach does not change this — both work.
