@@ -58,7 +58,8 @@
 
 - [x] Document go-cfclient/v3 minimum alpha version and CF API version floor — see [transitional RFC version guidance](rfc-draft-plugin-transitional-migration.md#go-cfclient-v3-version-guidance)
 - [ ] Define `cf-plugin-migrate.yml` YAML schema for generated V2 compatibility wrappers
-- [ ] Implement `cf-plugin-migrate` generator tool (field→API-call mapping, Go source output)
+- [ ] Implement `cf-plugin-migrate scan` (go/ast-based audit → YAML config) — see [transitional RFC scan design](rfc-draft-plugin-transitional-migration.md#automated-audit-cf-plugin-migrate-scan)
+- [ ] Implement `cf-plugin-migrate generate` (YAML config → Go source output)
 - [ ] Document token lifecycle pattern (`config.TokenProvider()` for long-running plugins)
 - [ ] Proof-of-concept: Analyze and walk through list-services migration (Tier 1: simple)
 - [x] Proof-of-concept: Analyze and walk through OCF Scheduler migration (Tier 2: moderate) — see [transitional RFC worked example](rfc-draft-plugin-transitional-migration.md#worked-example-ocf-scheduler-plugin)
