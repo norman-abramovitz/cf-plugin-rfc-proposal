@@ -56,7 +56,7 @@
 
 ## Transitional Migration (Phase 0)
 
-- [ ] Document go-cfclient/v3 minimum alpha version and CF API version floor
+- [x] Document go-cfclient/v3 minimum alpha version and CF API version floor — see [transitional RFC version guidance](rfc-draft-plugin-transitional-migration.md#go-cfclient-v3-version-guidance)
 - [ ] Define `cf-plugin-migrate.yml` YAML schema for generated V2 compatibility wrappers
 - [ ] Implement `cf-plugin-migrate` generator tool (field→API-call mapping, Go source output)
 - [ ] Document token lifecycle pattern (`config.TokenProvider()` for long-running plugins)

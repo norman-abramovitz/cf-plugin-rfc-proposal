@@ -87,6 +87,8 @@ Add go-cfclient to your plugin's dependencies:
 go get github.com/cloudfoundry/go-cfclient/v3
 ```
 
+**Version note:** go-cfclient v3 is still in alpha (v3.0.0-alpha.20 as of March 2026). See [go-cfclient V3 Version Guidance](#go-cfclient-v3-version-guidance) for minimum version recommendations and stability considerations.
+
 ### Step 2: Create a Client Helper
 
 Add a helper function that constructs a go-cfclient V3 client from the existing plugin connection:
@@ -893,11 +895,84 @@ Each would generate minimal wrappers with 1–2 V3 API calls per method, instead
 
 The migration guide above describes the *what*. This section captures the concrete work needed to make the transitional approach production-ready.
 
+### go-cfclient V3 Version Guidance
+
+#### Library Status
+
+go-cfclient v3 is published at `github.com/cloudfoundry/go-cfclient/v3`. As of March 2026, the latest release is **v3.0.0-alpha.20**. The library has shipped 20 alpha releases but no stable v3.0.0. The README states: *"The v3 version in the main branch is currently under development and may have breaking changes until a v3.0.0 release is cut."*
+
+Despite the alpha label, the library is in production use by multiple CF CLI plugins and has near-complete CAPI V3 coverage.
+
+#### CAPI V3 Coverage
+
+go-cfclient v3 implements **31 of 35 CAPI V3 resource groups with full coverage**, 2 with partial coverage, and 1 missing. Every resource needed for plugin migration is fully supported:
+
+| Resource Group | Coverage | Notes |
+|---|---|---|
+| Apps, Processes, Builds, Droplets, Packages | Full | Includes `PollStaged`, `PollReady` utilities |
+| Routes, Route Destinations | Full | `InsertDestinations`, `ReplaceDestinations`, `RemoveDestination` |
+| Service Instances (managed + user-provided) | Full | `CreateManaged`, `CreateUserProvided`, sharing support |
+| Service Credential Bindings | Full | Includes `GetDetails`, `GetParameters` |
+| Service Plans, Offerings, Brokers | Full | Includes `Include` variants for eager loading |
+| Service Route Bindings | Full | |
+| Organizations, Spaces, Roles, Users | Full | Includes `Include` variants for eager loading |
+| Domains, Stacks, Security Groups | Full | |
+| Tasks, Deployments, Sidecars | Full | |
+| Isolation Segments, Quotas (org + space) | Full | |
+| Feature Flags, Manifests, Resource Matches | Full | |
+| Audit Events, Usage Events (app + service) | Full | |
+| Revisions, Buildpacks, Jobs | Full | `PollComplete` for async operations |
+| Info (`/v3/info`) | **None** | Platform metadata — rarely needed by plugins |
+| Root (`/`, `/v3`) | Partial | Missing `/v3/info` and `/v3/usage_summary` |
+| Space Features | Partial | Only SSH; generic feature pattern not exposed |
+
+The library adds value beyond raw CAPI coverage:
+- **Pagination:** `ListAll` (auto-pages), `First`, `Single` helpers
+- **Include-based eager loading:** e.g., list apps with their spaces and orgs in one call
+- **Async job polling:** `PollComplete`, `PollStaged`, `PollReady`
+- **Typed filters:** `AppListOptions`, `ServiceInstanceListOptions`, etc.
+- **CF error codes:** typed predicates for error handling
+
+#### Versions in Production Use
+
+Surveyed plugins pin to different alpha versions:
+
+| Plugin | go-cfclient Version | Date |
+|---|---|---|
+| cf-lookup-route | v3.0.0-alpha.9 | 2024 |
+| Rabobank cf-plugins | v3.0.0-alpha.15 | 2025 |
+| DefaultEnv | v3.0.0-alpha.17 | 2025 |
+| App Autoscaler | v3.0.0-alpha.19 | 2026 |
+
+The spread from alpha.9 to alpha.19 indicates breaking changes between versions that forced plugins to pin rather than track latest.
+
+#### Minimum Version Recommendation
+
+Plugins adopting the transitional approach SHOULD use **v3.0.0-alpha.17 or later**. This version:
+- Includes the `config.Token()` function that handles the `"bearer "` prefix internally
+- Supports `config.SkipTLSValidation()` with a boolean parameter
+- Has stable interfaces for all resources used by the generated wrappers (Apps, Routes, Service Instances, Service Credential Bindings, Service Plans, Service Offerings)
+
+Plugins SHOULD pin to a specific alpha version in `go.mod` and upgrade deliberately, testing for breaking changes. Once go-cfclient releases v3.0.0 stable, all plugins SHOULD upgrade to it.
+
+#### CF API Version Floor
+
+go-cfclient v3 requires CAPI V3 endpoints. The minimum CF API version depends on which resources the plugin uses:
+
+| Resource | Minimum CAPI Version | CF Deployment |
+|---|---|---|
+| Apps, Spaces, Orgs (core) | 3.0.0 | 1.0+ |
+| Service Instances (user-provided) | 3.0.0 | 1.0+ |
+| Service Credential Bindings | 3.77.0 | ~18.0+ |
+| Route Destinations | 3.77.0 | ~18.0+ |
+| Service Plans, Offerings | 3.77.0 | ~18.0+ |
+
+Most actively maintained CF foundations run CAPI 3.100+ (CF Deployment 25+), so the version floor is not a practical concern for current deployments. The generated wrappers SHOULD document the minimum CAPI version per V3 resource used.
+
 ### Dependency Management
 
-- **go-cfclient/v3 version guidance.** The library is still at alpha (surveyed plugins use alpha.9 through alpha.19). The transitional RFC SHOULD recommend a minimum alpha version and document any breaking changes between alphas.
 - **CLI SDK version pinning.** Most plugins import `code.cloudfoundry.org/cli v7.1.0+incompatible`; a few use `code.cloudfoundry.org/cli/v8`. The transitional approach does not change this — both work.
-- **CF API version floor.** go-cfclient/v3 requires CAPI V3 endpoints. The minimum CAPI version that supports all V3 resources used by the generated wrappers SHOULD be documented.
+- **Dependency tree impact.** Adding go-cfclient/v3 pulls in `golang.org/x/oauth2`, `google.golang.org/protobuf`, and several other transitive dependencies. For plugins that vendor dependencies, this increases the vendor directory. For plugins using module proxies, the impact is minimal.
 
 ### Build System Integration
 
