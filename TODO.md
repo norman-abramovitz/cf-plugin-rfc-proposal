@@ -91,6 +91,7 @@
 ## Future RFCs (Out of Scope)
 
 - [ ] Polyglot plugin support (gRPC-based plugin model)
+- [ ] Official CAPI OpenAPI specification — no machine-readable spec exists ([cloud_controller_ng#2192](https://github.com/cloudfoundry/cloud_controller_ng/issues/2192), open since 2021). Community [capi-openapi-spec](https://github.com/cloudfoundry-community/capi-openapi-spec) under `cloudfoundry-community` parses HTML docs → OpenAPI 3.0.0. An official spec would enable auto-generated CAPI clients in any language, strengthening the polyglot plugin story.
 - [ ] GitHub-style plugin distribution and trust model
 - [ ] CLI adoption of go-cfclient internally
 - [ ] Standard option parsing framework for plugins

@@ -1076,10 +1076,50 @@ This transitional approach is **Phase 0** — work that plugin developers can do
 
 Plugins that complete Phase 0 will have minimal work remaining for Phases 1–4, since their domain logic already uses go-cfclient directly and their host interaction is limited to the core context methods that the V3 interface preserves.
 
+## Future Work: CAPI OpenAPI Specification and Polyglot Clients
+
+### The Missing Machine-Readable API Spec
+
+CAPI V3 has **no official OpenAPI or Swagger specification**. The V3 API docs at [v3-apidocs.cloudfoundry.org](https://v3-apidocs.cloudfoundry.org/) are generated from hand-written Slate Markdown, not from a machine-readable spec. This has been an open request since 2015, tracked as [cloud_controller_ng#2192](https://github.com/cloudfoundry/cloud_controller_ng/issues/2192) since 2021. A proof-of-concept to generate OpenAPI from CAPI's Ruby source code ([PR #4500](https://github.com/cloudfoundry/cloud_controller_ng/pull/4500)) was closed without merging.
+
+As a result, all existing CAPI client libraries — Go, Java, Python — are **hand-written**, not generated from a spec.
+
+### Community OpenAPI Efforts
+
+| Project | Approach | Status |
+|---|---|---|
+| [capi-openapi-spec](https://github.com/cloudfoundry-community/capi-openapi-spec) (cloudfoundry-community) | Parses V3 HTML docs → OpenAPI 3.0.0. Claims 100% coverage of 44 resource types (CAPI v3.195.0). | Active (June 2025) |
+| [capi-openapi-go-client](https://github.com/cloudfoundry-community/capi-openapi-go-client) (cloudfoundry-community) | Go client generated from the above spec via oapi-codegen | Active (June 2025) |
+| [cf-api-openapi-poc](https://github.com/FloThinksPi/cf-api-openapi-poc) | Manual + AI-assisted conversion → OpenAPI 3.1.0 | POC (July 2025) |
+| [SAP OpenAPI contribution](https://github.com/sap-contributions/cloudfoundry-cloud-controller-v3-openapi) | Manual spec file | Stale (Nov 2023) |
+
+### CAPI V3 Client Libraries Across Languages
+
+| Library | Language | Maintained? | Notes |
+|---|---|---|---|
+| [go-cfclient](https://github.com/cloudfoundry/go-cfclient) | Go | Yes (official, `cloudfoundry` org) | Hand-written, v3.0.0-alpha.20, recommended by this RFC |
+| [cf-java-client](https://github.com/cloudfoundry/cf-java-client) | Java | Yes (official, `cloudfoundry` org) | Hand-written, Reactor Netty-based, 330 stars |
+| [cf-python-client](https://github.com/cloudfoundry-community/cf-python-client) | Python | Yes (community) | Hand-written, 55 stars |
+| [capi-openapi-go-client](https://github.com/cloudfoundry-community/capi-openapi-go-client) | Go | Active (community) | Generated from OpenAPI spec, less mature than go-cfclient |
+
+### Implications for Plugin Migration
+
+1. **Go plugins** can use go-cfclient (recommended) or cf-java-client is available for JVM-based plugins. Python plugins can use cf-python-client.
+
+2. **Polyglot gap.** The V3 RFC proposes JSON-RPC for polyglot plugin support, but plugin authors in languages beyond Go, Java, and Python have no CAPI client SDK today. An official OpenAPI spec would enable generated clients in any language via standard code generators (openapi-generator, oapi-codegen, etc.).
+
+3. **The `capi-openapi-spec` project under `cloudfoundry-community`** is the most promising path toward an official machine-readable spec. If it matures and is adopted by the CF Foundation, it would significantly strengthen the polyglot plugin story by enabling auto-generated CAPI clients in any language.
+
+4. **This RFC recommends go-cfclient** as the companion library for Go plugins. The OpenAPI-generated client is an alternative but lacks go-cfclient's convenience methods (polling, eager loading, `Single`/`First` helpers). As both mature, a future recommendation update may be warranted.
+
 ## References
 
 - [CLI Plugin Interface V3 RFC](rfc-draft-cli-plugin-interface-v3.md) — The main RFC defining the new plugin interface
 - [Plugin Survey — Rabobank Case Study](plugin-survey.md#case-study-rabobank-guest-side-transitional-wrapper) — Detailed analysis of the Rabobank transitional wrapper
 - [Rabobank cf-plugins](https://github.com/rabobank/cf-plugins) — The production transitional wrapper library
 - [go-cfclient](https://github.com/cloudfoundry/go-cfclient) — Cloud Foundry V3 Go client library
+- [cf-java-client](https://github.com/cloudfoundry/cf-java-client) — Cloud Foundry Java client library
+- [cf-python-client](https://github.com/cloudfoundry-community/cf-python-client) — Cloud Foundry Python client library
+- [capi-openapi-spec](https://github.com/cloudfoundry-community/capi-openapi-spec) — Community-maintained OpenAPI 3.0.0 spec for CAPI V3
+- [cloud_controller_ng#2192](https://github.com/cloudfoundry/cloud_controller_ng/issues/2192) — Tracking issue for official CAPI OpenAPI spec
 - [cloudfoundry/cli#3621](https://github.com/cloudfoundry/cli/issues/3621) — New Plugin Interface tracking issue

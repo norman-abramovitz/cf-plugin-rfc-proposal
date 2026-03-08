@@ -733,6 +733,7 @@ func (p *MyPlugin) Run(ctx pluginapi.PluginContext, args []string) {
 **Enabled by this RFC but requiring further design:**
 
 - **Polyglot guest SDKs.** The embedded metadata marker and JSON-RPC 2.0 protocol enable guests in any language. Community-maintained SDKs for Python, Java, and other languages can be developed independently of the host, implementing the JSON-RPC channel client and providing language-idiomatic wrappers for the core contract methods.
+- **Official CAPI OpenAPI specification.** CAPI V3 has no machine-readable API specification ([cloud_controller_ng#2192](https://github.com/cloudfoundry/cloud_controller_ng/issues/2192), open since 2021, requested since 2015). All existing CAPI client libraries (Go, Java, Python) are hand-written. A community-maintained [OpenAPI 3.0.0 spec](https://github.com/cloudfoundry-community/capi-openapi-spec) exists under `cloudfoundry-community` (parsed from the V3 HTML docs), with a [generated Go client](https://github.com/cloudfoundry-community/capi-openapi-go-client) as proof-of-concept. An official OpenAPI spec would enable auto-generated CAPI clients in any language, significantly strengthening the polyglot plugin story beyond what hand-written SDKs can cover.
 
 **Deferred to separate RFCs:**
 
@@ -750,6 +751,14 @@ func (p *MyPlugin) Run(ctx pluginapi.PluginContext, args []string) {
 - [Semantic Versioning 2.0.0](https://semver.org/)
 - [JSON-RPC 2.0 Specification](https://www.jsonrpc.org/specification)
 - [docopt — Command-line interface description language](http://docopt.org/)
+
+### CAPI V3 Client Libraries and Specifications
+
+- [go-cfclient](https://github.com/cloudfoundry/go-cfclient) — Go (official). Hand-written, v3.0.0-alpha series. Recommended for Go guests.
+- [cf-java-client](https://github.com/cloudfoundry/cf-java-client) — Java (official). Reactor Netty-based.
+- [cf-python-client](https://github.com/cloudfoundry-community/cf-python-client) — Python (community). Hand-written.
+- [capi-openapi-spec](https://github.com/cloudfoundry-community/capi-openapi-spec) — Community OpenAPI 3.0.0 spec for CAPI V3. Enables generated clients in any language.
+- [cloud_controller_ng#2192](https://github.com/cloudfoundry/cloud_controller_ng/issues/2192) — Tracking issue for official CAPI OpenAPI spec (open since 2021).
 
 ### Related Documents
 
