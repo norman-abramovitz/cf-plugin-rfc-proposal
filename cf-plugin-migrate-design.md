@@ -163,6 +163,11 @@ If the developer keeps the fields, the generated code includes them with a comme
 | 4 | Error handling in generated code | Eager return with partial results |
 | 5 | Per-item API calls | Generate the code, annotate cost in YAML |
 
+## Test Environment
+
+- **CF API:** `https://api.sys.adepttech.ca`
+- **Purpose:** Validate generated wrappers against a live CAPI V3 endpoint. Test with real user permissions to verify per-item API call behavior and field mapping correctness.
+
 ## References
 
 - [YAML Schema](rfc-draft-plugin-transitional-migration.md#yaml-schema-cf-plugin-migrateyml) — formal `cf-plugin-migrate.yml` definition
