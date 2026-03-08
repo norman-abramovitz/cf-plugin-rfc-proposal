@@ -131,20 +131,18 @@ On failure, the caller receives all fields populated up to the point of failure.
 
 **Rationale:** Some V2 model fields require per-item API calls when used in list methods. For example, `GetApps` with `TotalInstances` requires `Processes.ListForApp()` for each app. The V2 CLI populated these from a summary endpoint that returned everything in one response — no V3 equivalent exists.
 
-However, the actual cost depends on user permissions. `ListAll` calls return only resources the user has permission to see. A space developer sees their space's apps, not the entire foundation. A developer with 5 apps in their space gets 5 extra calls — not 50. The N+1 concern is bounded by the user's visibility scope.
+All V3 API list calls return only resources the user has permission to see. A space developer sees their space's apps; an org auditor sees their org's apps. The number of per-app calls matches the user's visibility scope — this is the normal behavior of the V3 API, not a special concern.
 
-The generator produces the code (sequential loops) and the YAML output from `scan` annotates these fields so the developer can make an informed choice:
+The generator produces the code and the YAML output from `scan` notes the additional calls:
 
 ```yaml
 methods:
   GetApps:
     fields: [Guid, Name, State]
-    # Per-item fields (1 API call per app):
-    # TotalInstances, RunningInstances, Memory, DiskQuota
-    # Remove if not needed to reduce API calls.
+    # Additional calls per app: TotalInstances, RunningInstances, Memory, DiskQuota
 ```
 
-If the developer keeps the fields, the generated code includes them with a comment noting the per-item cost. If they remove them, the generator omits those API calls entirely.
+If the developer keeps the fields, the generated code includes them. If they remove them, the generator omits those API calls entirely.
 
 **Alternatives considered:**
 
@@ -191,7 +189,7 @@ If the developer keeps the fields, the generated code includes them with a comme
 
 **Impact on Decision 2 (dependency chains):** Some dependency chains are eliminated entirely. For example, `GetSpace` previously required a separate org GET (Group 2) before the domains lookup (Group 5) could use the org GUID. With `include=organization`, the org data comes back with the space in Group 1, removing the chain. Similarly, `GetService`'s plan → offering chain collapses into a single call.
 
-**Impact on Decision 5 (per-item calls):** The `include` and `fields` parameters do not help with `GetApps` Groups 2–4 (processes and stats) because `/v3/processes` supports neither `include` nor `fields`. Per-app calls remain unavoidable for those fields, but the cost is bounded by user permissions as previously decided.
+**Impact on Decision 5 (per-item calls):** The `include` and `fields` parameters do not help with `GetApps` Groups 2–4 (processes and stats) because `/v3/processes` supports neither `include` nor `fields`. Per-app calls remain unavoidable for those fields. As with all V3 API calls, the results are scoped by the user's permissions.
 
 **go-cfclient support:** The generator's output uses go-cfclient's typed API. Whether go-cfclient exposes `include` and `fields` as options on its list/get methods needs to be verified during implementation. If go-cfclient does not expose a particular parameter, the generator can fall back to raw HTTP calls or the previous multi-call approach.
 

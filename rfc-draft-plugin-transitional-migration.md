@@ -1274,26 +1274,24 @@ The most complex model. Rabobank populates all fields with 10 V3 API calls. The 
 | **1: Apps** | `Applications.ListAll(spaceGUID)` | `Guid` | `.GUID` | Always required |
 | | | `Name` | `.Name` | |
 | | | `State` | `.State` | |
-| **2: Process** | `Processes.ListForApp()` **per app** | `TotalInstances` | `.Instances` | Per-app call — cost bounded by user permissions |
+| **2: Process** | `Processes.ListForApp()` **per app** | `TotalInstances` | `.Instances` | Per-app call |
 | | | `Memory` | `.MemoryInMB` | |
 | | | `DiskQuota` | `.DiskInMB` | |
 | **3: Stats** | `Processes.GetStats()` **per app** | `RunningInstances` | `len(.Stats)` | Per-app call — requires Group 2 |
 | **4: Routes** | `Routes.ListForApp(include=domain)` **per app** | `Routes[].*` | (see GetAppModel Group 8) | Per-app call — `include=domain` for domain names |
 
-**Per-app call note:** Groups 2–4 require per-app API calls. The V2 CLI populated these from the `/v2/apps` summary endpoint which returned everything in one response — no V3 equivalent exists. However, the actual cost is bounded by user permissions: `ListAll` returns only resources the user can see. A space developer with 5 apps gets 5 extra calls, not 50. The `/v3/processes` and `/v3/routes` endpoints do not support `include` or `fields` parameters, so per-app calls are unavoidable for these fields.
+**Per-app calls:** Groups 2–4 require per-app API calls because `/v3/processes` and `/v3/routes` do not support `include` or `fields` parameters. The V2 CLI populated these from a summary endpoint — no V3 equivalent exists. The number of calls matches the number of apps visible to the user based on their permissions (space developer, org auditor, admin, etc.).
 
-The YAML output from `scan` annotates per-app fields so the developer can make an informed choice:
+The YAML output from `scan` notes the additional calls:
 
 ```yaml
 methods:
   GetApps:
     fields: [Guid, Name, State]
-    # Per-app fields (1 API call per app):
-    # TotalInstances, RunningInstances, Memory, DiskQuota
-    # Remove if not needed to reduce API calls.
+    # Additional calls per app: TotalInstances, RunningInstances, Memory, DiskQuota
 ```
 
-Rabobank's `GetApps()` only populates Name, Guid, and State (Group 1), avoiding per-app calls entirely.
+Rabobank's `GetApps()` only populates Name, Guid, and State (Group 1).
 
 ##### GetService_Model — `GetService(serviceName string)`
 
@@ -1432,7 +1430,7 @@ The `include` and `fields` parameters available in CAPI V3 significantly reduce 
 | Method | Rabobank Calls | Generator Calls (all fields) | Key Optimization |
 |---|---|---|---|
 | `GetApp` | 10 | 10 | `include=domain` on routes (eliminates URL parsing) |
-| `GetApps` | 1 (partial) | 1 + per-app | Per-app calls bounded by user permissions |
+| `GetApps` | 1 (partial) | 1 + per-app | Per-app calls for process/stats fields; results scoped by user permissions |
 | `GetService` | 3 | **1** | `fields[service_plan]` + `fields[service_plan.service_offering]` |
 | `GetServices` | 1 + 3×N | **2** | `fields` on list + single bindings call with `include=app` |
 | `GetOrg` | 5 | 5 | No `include`/`fields` available on these endpoints |
