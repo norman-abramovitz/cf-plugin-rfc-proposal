@@ -166,7 +166,7 @@ If the developer keeps the fields, the generated code includes them. If they rem
 | `GetSpace` | 7 calls (separate org GET) | **6 calls** with `include=organization` on spaces | 1 call eliminated |
 | `GetApp` (Routes) | Routes + URL parsing for domain name | Routes with `include=domain` | Cleaner, no parsing |
 
-**Available `include` and `fields` by endpoint (verified live):**
+**Available `include` and `fields` by endpoint (defined in the [CAPI V3 API documentation](https://v3-apidocs.cloudfoundry.org), verified against v3.180.0):**
 
 | Endpoint | `include` | `fields` |
 |---|---|---|

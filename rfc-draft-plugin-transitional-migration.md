@@ -1196,7 +1196,7 @@ The CAPI V3 API supports two mechanisms for retrieving related resources in a si
 - **`include`** — returns full related resources in an `included` section of the response
 - **`fields`** — returns selected fields of related resources (supports nested paths like `service_plan.service_offering`)
 
-Availability was verified against CAPI V3 v3.180.0:
+The [CAPI V3 API documentation](https://v3-apidocs.cloudfoundry.org) defines the available `include`, `fields`, and filter parameters for each resource. The table below summarizes the parameters relevant to the field mapping, verified against CAPI V3 v3.180.0:
 
 | Endpoint | `include` Values | `fields` Resources |
 |---|---|---|
