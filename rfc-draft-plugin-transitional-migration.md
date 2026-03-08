@@ -266,18 +266,21 @@ Fields not listed in the configuration remain zero-valued. The generated code do
 
 #### Field-to-API-Call Mapping
 
-The generator uses a field dependency map to determine the minimum V3 calls needed:
+The generator uses a field dependency map to determine the minimum V3 calls needed. This summary shows the incremental cost for `GetApp` — the most complex model. See [Complete V2→V3 Field Mapping Reference](#complete-v2v3-field-mapping-reference) for all models.
 
 | V2 Fields Requested | V3 API Calls Required | Call Count |
 |---|---|---|
-| `Name`, `Guid`, `State`, `Memory`, `DiskQuota` | `Applications.Single()` | 1 |
+| `Name`, `Guid`, `State`, `SpaceGuid` | `Applications.Single()` | 1 |
 | + `Routes` | + `Routes.ListForApp()` | 2 |
-| + `RunningInstances`, `Instances` | + `Processes.ListForApp()` + `ProcessStats` | 3–4 |
-| + `BuildpackUrl` | + `Droplets.ListForApp()` | 3–5 |
-| + `EnvironmentVars` | + `Applications.GetEnvironment()` | 4–6 |
-| + `Services` | + `ServiceCredentialBindings.ListAll()` | 5–7 |
+| + `Command`, `Memory`, `DiskQuota`, `InstanceCount` | + `Processes.ListForApp()` + `Processes.Get()` | 3–4 |
+| + `RunningInstances`, `Instances` | + `Processes.GetStats()` | 4–5 |
+| + `BuildpackUrl`, `PackageState` | + `Droplets.GetCurrentForApp()` | 5–6 |
+| + `Stack` | + `Stacks.Single()` | 6–7 |
+| + `EnvironmentVars` | + `Applications.GetEnvironmentVariables()` | 7–8 |
+| + `Services` | + `ServiceCredentialBindings.ListIncludeServiceInstances()` | 8–9 |
+| + `PackageUpdatedAt` | + `Packages.ListForAppAll()` | 9–10 |
 
-Compare this to Rabobank's approach which always makes 11 calls to populate every field, regardless of what the plugin uses.
+Compare this to Rabobank's approach which always makes 10 V3 API calls (plus 1 host RPC call for `GetCurrentSpace()`) to populate every field, regardless of what the plugin uses.
 
 #### Automated Audit: `cf-plugin-migrate scan`
 
@@ -1098,9 +1101,599 @@ cf-plugin-migrate generate            # YAML config → v2compat_generated.go
 
 - **`scan`** — Uses `go/ast` and `go/types` to find V2 domain method call sites, trace field access on return values, and emit the YAML config. Flags cross-function data flow for manual review. See [Automated Audit](#automated-audit-cf-plugin-migrate-scan) for design details.
 - **`generate`** — Reads the YAML config, maps fields to V3 API calls using a field dependency table, and emits Go source with typed go-cfclient calls. See [How It Works](#how-it-works) and [Field-to-API-Call Mapping](#field-to-api-call-mapping) for the generation model.
-- **YAML schema** for `cf-plugin-migrate.yml` — methods, fields, route sub-fields, output package name
-- **Field-to-API-call mapping** maintained as a data table in the tool, updatable as go-cfclient evolves
+- **YAML schema** for `cf-plugin-migrate.yml` — see [YAML Schema](#yaml-schema-cf-plugin-migrateyml)
+- **Field-to-API-call mapping** maintained as a data table in the tool, updatable as go-cfclient evolves — see [Complete V2→V3 Field Mapping Reference](#complete-v2v3-field-mapping-reference)
+- **V2 model struct reference** — see [V2 Plugin Model Struct Reference](#v2-plugin-model-struct-reference)
 - **Packaging** — standalone CLI tool, installable via `go install`. Proposed location: `code.cloudfoundry.org/cli-plugin-helpers/cmd/cf-plugin-migrate`
+
+#### YAML Schema: `cf-plugin-migrate.yml`
+
+The YAML configuration declares which V2 domain methods the plugin calls and which fields it accesses. The generator uses this to produce minimal wrappers with only the V3 API calls required.
+
+**Formal schema (version 1):**
+
+```yaml
+# Required: schema version for forward compatibility
+schema_version: 1
+
+# Go package name for the generated file (default: "main")
+package: main
+
+# V2 domain methods used by the plugin.
+# Keys are method names from plugin.CliConnection.
+# Only methods that return plugin_models.* types are supported.
+methods:
+  GetApp:
+    # Top-level fields accessed on GetAppModel
+    fields: [Guid, Name, State, Routes, Stack]
+    # Sub-fields for composite types (required when parent is listed)
+    # Convention: lowercase parent field name + "_fields"
+    route_fields: [Host, Domain.Name, Port, Path]
+    stack_fields: [Name, Guid, Description]
+  GetApps:
+    fields: [Guid, Name, State]
+  GetServices:
+    fields: [Guid, Name, ServicePlan, IsUserProvided]
+    service_plan_fields: [Name, Guid]
+  GetService:
+    fields: [Guid, Name, DashboardUrl, ServicePlan, ServiceOffering, LastOperation]
+    service_plan_fields: [Name, Guid]
+    service_offering_fields: [Name, DocumentationUrl]
+    last_operation_fields: [Type, State, Description]
+  GetOrg:
+    fields: [Guid, Name, Spaces, Domains, QuotaDefinition]
+  GetOrgs:
+    fields: [Guid, Name]
+  GetSpace:
+    fields: [Guid, Name, Organization, Applications, ServiceInstances]
+  GetSpaces:
+    fields: [Guid, Name]
+  GetOrgUsers:
+    fields: [Guid, Username, Roles]
+  GetSpaceUsers:
+    fields: [Guid, Username, Roles]
+```
+
+**Schema rules:**
+
+| Rule | Description |
+|---|---|
+| `schema_version` | Required. Currently `1`. Allows the tool to evolve the schema without breaking existing configs. |
+| `package` | Go package name for the generated `v2compat_generated.go`. Defaults to `main`. |
+| `methods` | Map of V2 method name → field specification. Only methods listed are generated. |
+| `fields` | List of top-level field names from the corresponding `plugin_models.*` struct. Must match the Go field name exactly. |
+| `*_fields` | Sub-field specifiers for composite fields. Named `{lowercase_parent}_fields`. Dot notation for nested access (e.g., `Domain.Name`). Only required when the parent field is listed in `fields`. |
+
+**Supported methods and sub-field keys:**
+
+| Method | Return Type | Available Sub-field Keys |
+|---|---|---|
+| `GetApp` | `GetAppModel` | `route_fields`, `stack_fields`, `instance_fields`, `service_fields` |
+| `GetApps` | `[]GetAppsModel` | `route_fields` |
+| `GetService` | `GetService_Model` | `service_plan_fields`, `service_offering_fields`, `last_operation_fields` |
+| `GetServices` | `[]GetServices_Model` | `service_plan_fields`, `service_fields`, `last_operation_fields` |
+| `GetOrg` | `GetOrg_Model` | `space_fields`, `domain_fields`, `space_quota_fields`, `quota_fields` |
+| `GetOrgs` | `[]GetOrgs_Model` | (none) |
+| `GetSpace` | `GetSpace_Model` | `org_fields`, `app_fields`, `service_instance_fields`, `domain_fields`, `security_group_fields`, `space_quota_fields` |
+| `GetSpaces` | `[]GetSpaces_Model` | (none) |
+| `GetOrgUsers` | `[]GetOrgUsers_Model` | (none — flat struct) |
+| `GetSpaceUsers` | `[]GetSpaceUsers_Model` | (none — flat struct) |
+
+Methods not in this table (`GetCurrentOrg`, `GetCurrentSpace`, `AccessToken`, `ApiEndpoint`, etc.) are context methods that pass through to the host unchanged. They do not need wrappers.
+
+#### Complete V2→V3 Field Mapping Reference
+
+This section provides the field-to-API-call mapping the `generate` subcommand uses as its knowledge base. Fields are organized into **dependency groups** — sets of fields that share the same V3 API call. The generator adds a V3 call only when at least one field from that group is requested.
+
+The mapping is derived from first-principles analysis of the [V2 plugin model types](https://github.com/cloudfoundry/cli/tree/main/plugin/models) and the [CAPI V3 API documentation](https://v3-apidocs.cloudfoundry.org), validated against the [Rabobank implementation](https://github.com/rabobank/cf-plugins/blob/main/connection.go). See [V2 Plugin Model Struct Reference](#v2-plugin-model-struct-reference) for the complete Go type definitions.
+
+##### GetAppModel — `GetApp(appName string)`
+
+The most complex model. Rabobank populates all fields with 10 V3 API calls. The generated approach selects only the groups needed.
+
+| Group | V3 API Call(s) | V2 Fields | V3 Field Path | Notes |
+|---|---|---|---|---|
+| **1: App** | `Applications.Single(name, spaceGUID)` | `Guid` | `.GUID` | Always required — base call |
+| | | `Name` | `.Name` | |
+| | | `State` | `.State` | |
+| | | `SpaceGuid` | (input parameter) | Passed as filter, not from response |
+| **2: Process** | `Processes.ListForApp(appGUID)` + `Processes.Get(processGUID)` | `Command` | `.Command` | First process type only (V2 had single process) |
+| | | `DetectedStartCommand` | `.Command` | V3 does not distinguish detected vs explicit |
+| | | `DiskQuota` | `.DiskInMB` | |
+| | | `InstanceCount` | `.Instances` | |
+| | | `Memory` | `.MemoryInMB` | |
+| | | `HealthCheckTimeout` | `.HealthCheck.Data.Timeout` | Pointer — nil means no timeout set |
+| **3: Stats** | `Processes.GetStats(processGUID)` | `RunningInstances` | `len(.Stats)` | Requires Group 2 for process GUID |
+| | | `Instances[].State` | `.Stats[].State` | |
+| | | `Instances[].Details` | `.Stats[].Details` | Pointer |
+| | | `Instances[].Since` | computed from `.Stats[].Uptime` | `time.Now() - uptime` |
+| | | `Instances[].CpuUsage` | `.Stats[].Usage.CPU` | |
+| | | `Instances[].DiskQuota` | `.Stats[].DiskQuota` | In bytes (not MB) |
+| | | `Instances[].DiskUsage` | `.Stats[].Usage.Disk` | |
+| | | `Instances[].MemQuota` | `.Stats[].MemoryQuota` | |
+| | | `Instances[].MemUsage` | `.Stats[].Usage.Memory` | |
+| **4: Droplet** | `Droplets.GetCurrentForApp(appGUID)` | `BuildpackUrl` | `.Buildpacks[0].Name` | V2 exposed single buildpack; V3 supports multiple |
+| | | `PackageState` | `.State` | Droplet state, not package state |
+| | | `StagingFailedReason` | `.Error` | Pointer |
+| **5: Stack** | `Stacks.Single(droplet.Stack)` | `Stack.Guid` | `.GUID` | Requires Group 4 for stack name from droplet |
+| | | `Stack.Name` | `.Name` | |
+| | | `Stack.Description` | `.Description` | Pointer |
+| **6: Package** | `Packages.ListForAppAll(appGUID)` | `PackageUpdatedAt` | last `.UpdatedAt` | Assumes latest package is last in list |
+| **7: Env** | `Applications.GetEnvironmentVariables(appGUID)` | `EnvironmentVars` | (full map) | |
+| **8: Routes** | `Routes.ListForApp(appGUID)` | `Routes[].Guid` | `.GUID` | |
+| | | `Routes[].Host` | `.Host` | |
+| | | `Routes[].Path` | `.Path` | |
+| | | `Routes[].Port` | `.Port` | Pointer. V3 route port ≠ V2 app port — see [ports discussion](#structural-change-portsportsgo) |
+| | | `Routes[].Domain.Guid` | `.Relationships.Domain.Data.GUID` | |
+| | | `Routes[].Domain.Name` | computed from `.URL` | Rabobank parses host prefix from URL; alternatively call `Domains.Get()` |
+| **9: Services** | `ServiceCredentialBindings.ListIncludeServiceInstances(appGUID)` | `Services[].Guid` | (included SI).GUID | Uses `include` parameter — avoids N+1 |
+| | | `Services[].Name` | (included SI).Name | |
+
+**Dependency chain:** Group 3 requires Group 2 (process GUID). Group 5 requires Group 4 (stack name from droplet). All other groups are independent and can be called concurrently.
+
+**Rabobank `include` usage:** Rabobank uses `ListIncludeServiceInstancesAll` for Group 9, fetching service instances alongside bindings in a single call. This is the only `include` optimization in their `GetApp` implementation. The generator SHOULD use `include` parameters where available.
+
+##### GetAppsModel — `GetApps()`
+
+| Group | V3 API Call(s) | V2 Fields | V3 Field Path | Notes |
+|---|---|---|---|---|
+| **1: Apps** | `Applications.ListAll(spaceGUID)` | `Guid` | `.GUID` | Always required |
+| | | `Name` | `.Name` | |
+| | | `State` | `.State` | |
+| **2: Process** | `Processes.ListForApp()` **per app** | `TotalInstances` | `.Instances` | **N+1 problem** |
+| | | `Memory` | `.MemoryInMB` | |
+| | | `DiskQuota` | `.DiskInMB` | |
+| **3: Stats** | `Processes.GetStats()` **per app** | `RunningInstances` | `len(.Stats)` | **N+1 problem** — requires Group 2 |
+| **4: Routes** | `Routes.ListForApp()` **per app** | `Routes[].*` | (see GetAppModel Group 8) | **N+1 problem** |
+
+**N+1 warning:** Groups 2–4 require per-app API calls. For a space with 50 apps, requesting `TotalInstances` adds 50+ API calls. The V2 CLI populated these from the `/v2/apps` summary endpoint which returned everything in one response — no V3 equivalent exists. The generator SHOULD warn when these fields are requested and suggest using go-cfclient directly with concurrent calls. Rabobank's `GetApps()` only populates Name, Guid, and State (Group 1), avoiding this problem entirely.
+
+##### GetService_Model — `GetService(serviceName string)`
+
+| Group | V3 API Call(s) | V2 Fields | V3 Field Path | Notes |
+|---|---|---|---|---|
+| **1: Instance** | `ServiceInstances.Single(name, spaceGUID)` | `Guid` | `.GUID` | Always required |
+| | | `Name` | `.Name` | |
+| | | `DashboardUrl` | `.DashboardURL` | Pointer |
+| | | `IsUserProvided` | `.Type == "user-provided"` | |
+| | | `LastOperation.Type` | `.LastOperation.Type` | |
+| | | `LastOperation.State` | `.LastOperation.State` | |
+| | | `LastOperation.Description` | `.LastOperation.Description` | |
+| | | `LastOperation.CreatedAt` | `.LastOperation.CreatedAt.String()` | |
+| | | `LastOperation.UpdatedAt` | `.LastOperation.UpdatedAt.String()` | |
+| **2: Plan** | `ServicePlans.Get(instance...ServicePlan.Data.GUID)` | `ServicePlan.Name` | `.Name` | |
+| | | `ServicePlan.Guid` | `.GUID` | |
+| **3: Offering** | `ServiceOfferings.Get(plan...ServiceOffering.Data.GUID)` | `ServiceOffering.Name` | `.Name` | Requires Group 2 for offering GUID |
+| | | `ServiceOffering.DocumentationUrl` | `.DocumentationURL` | |
+
+**Dependency chain:** Group 3 requires Group 2 (service offering GUID comes from the plan's relationships).
+
+**Optimization opportunity:** go-cfclient's `ServiceInstances.ListIncludeServicePlansAll()` could eliminate the separate plan GET. Not yet used by Rabobank.
+
+##### GetServices_Model — `GetServices()`
+
+| Group | V3 API Call(s) | V2 Fields | V3 Field Path | Notes |
+|---|---|---|---|---|
+| **1: Instances** | `ServiceInstances.ListAll(spaceGUID)` | `Guid` | `.GUID` | Always required |
+| | | `Name` | `.Name` | |
+| | | `IsUserProvided` | `.Type == "user-provided"` | |
+| | | `LastOperation.Type` | `.LastOperation.Type` | |
+| | | `LastOperation.State` | `.LastOperation.State` | |
+| **2: Apps** | `ServiceCredentialBindings.ListIncludeApps()` **per instance** | `ApplicationNames` | (included App).Name | Uses `include` — Rabobank pattern |
+| **3: Plan** | `ServicePlans.Get()` **per instance** | `ServicePlan.Name` | `.Name` | N+1 per instance |
+| | | `ServicePlan.Guid` | `.GUID` | |
+| **4: Offering** | `ServiceOfferings.Get()` **per instance** | `Service.Name` | `.Name` | Requires Group 3 |
+
+**N+1 note:** Groups 2–4 require per-instance API calls. Rabobank makes 3 additional calls per service instance (bindings+apps, plan, offering).
+
+**Rabobank `include` usage:** Uses `ListIncludeAppsAll` for Group 2, fetching bound apps alongside bindings. Does not use `include` for plans or offerings — an optimization opportunity.
+
+##### GetOrg_Model — `GetOrg(orgName string)`
+
+| Group | V3 API Call(s) | V2 Fields | V3 Field Path | Notes |
+|---|---|---|---|---|
+| **1: Org** | `Organizations.Single(name)` | `Guid` | `.GUID` | Always required |
+| | | `Name` | `.Name` | |
+| **2: Quota** | `OrganizationQuotas.Get(org...Quota.Data.GUID)` | `QuotaDefinition.Guid` | `.GUID` | Only if org has a quota assigned |
+| | | `QuotaDefinition.Name` | `.Name` | |
+| | | `QuotaDefinition.MemoryLimit` | `.Apps.TotalMemoryInMB` | Pointer → `int64` |
+| | | `QuotaDefinition.InstanceMemoryLimit` | `.Apps.PerProcessMemoryInMB` | Pointer → `int64` |
+| | | `QuotaDefinition.RoutesLimit` | `.Routes.TotalRoutes` | Pointer → `int` |
+| | | `QuotaDefinition.ServicesLimit` | `.Services.TotalServiceInstances` | Pointer → `int` |
+| | | `QuotaDefinition.NonBasicServicesAllowed` | `.Services.PaidServicesAllowed` | |
+| **3: Spaces** | `Spaces.ListAll(orgGUID)` | `Spaces[].Guid` | `.GUID` | |
+| | | `Spaces[].Name` | `.Name` | |
+| **4: Domains** | `Domains.ListForOrganization(orgGUID)` | `Domains[].Guid` | `.GUID` | |
+| | | `Domains[].Name` | `.Name` | |
+| | | `Domains[].OwningOrganizationGuid` | `.Relationships.Organization.Data.GUID` | nil for shared domains |
+| | | `Domains[].Shared` | `.Relationships.Organization.Data == nil` | Shared = no owning org |
+| **5: SpaceQuotas** | `SpaceQuotas.ListAll(orgGUID)` | `SpaceQuotas[].Guid` | `.GUID` | |
+| | | `SpaceQuotas[].Name` | `.Name` | |
+| | | `SpaceQuotas[].MemoryLimit` | `.Apps.TotalMemoryInMB` | Pointer → `int64` |
+| | | `SpaceQuotas[].InstanceMemoryLimit` | `.Apps.PerProcessMemoryInMB` | Pointer → `int64` |
+| | | `SpaceQuotas[].RoutesLimit` | `.Routes.TotalRoutes` | Pointer → `int` |
+| | | `SpaceQuotas[].ServicesLimit` | `.Services.TotalServiceInstances` | Pointer → `int` |
+| | | `SpaceQuotas[].NonBasicServicesAllowed` | `.Services.PaidServicesAllowed` | |
+
+All groups are independent — no dependency chains.
+
+##### GetOrgs_Model — `GetOrgs()`
+
+| Group | V3 API Call(s) | V2 Fields | V3 Field Path | Notes |
+|---|---|---|---|---|
+| **1: Orgs** | `Organizations.ListAll()` | `Guid` | `.GUID` | Single call |
+| | | `Name` | `.Name` | |
+
+##### GetSpace_Model — `GetSpace(spaceName string)`
+
+| Group | V3 API Call(s) | V2 Fields | V3 Field Path | Notes |
+|---|---|---|---|---|
+| **1: Space** | `Spaces.Single(name)` | `Guid` | `.GUID` | Always required |
+| | | `Name` | `.Name` | |
+| **2: Org** | `Organizations.Get(space...Organization.Data.GUID)` | `Organization.Guid` | `.GUID` | |
+| | | `Organization.Name` | `.Name` | |
+| **3: Apps** | `Applications.ListAll(spaceGUID)` | `Applications[].Guid` | `.GUID` | |
+| | | `Applications[].Name` | `.Name` | |
+| **4: Services** | `ServiceInstances.ListAll(spaceGUID)` | `ServiceInstances[].Guid` | `.GUID` | |
+| | | `ServiceInstances[].Name` | `.Name` | |
+| **5: Domains** | `Domains.ListAll(orgGUID)` | `Domains[].Guid` | `.GUID` | Requires Group 2 for org GUID |
+| | | `Domains[].Name` | `.Name` | |
+| | | `Domains[].OwningOrganizationGuid` | `.Relationships.Organization.Data.GUID` | |
+| | | `Domains[].Shared` | (computed) | Rabobank sets all to `true` — likely a bug |
+| **6: SecurityGroups** | `SecurityGroups.ListAll(runningSpaceGUID)` | `SecurityGroups[].Guid` | `.GUID` | Filters by running space only |
+| | | `SecurityGroups[].Name` | `.Name` | |
+| | | `SecurityGroups[].Rules` | `.Rules` → JSON marshal/unmarshal | Dynamic structure via `[]map[string]any` |
+| **7: SpaceQuota** | `SpaceQuotas.Get(space...Quota.Data.GUID)` | `SpaceQuota.Guid` | `.GUID` | Only if space has a quota assigned |
+| | | `SpaceQuota.Name` | `.Name` | |
+| | | `SpaceQuota.MemoryLimit` | `.Apps.TotalMemoryInMB` | Pointer → `int64` |
+| | | `SpaceQuota.InstanceMemoryLimit` | `.Apps.PerProcessMemoryInMB` | Pointer → `int64` |
+| | | `SpaceQuota.RoutesLimit` | `.Routes.TotalRoutes` | Pointer → `int` |
+| | | `SpaceQuota.ServicesLimit` | `.Services.TotalServiceInstances` | Pointer → `int` |
+| | | `SpaceQuota.NonBasicServicesAllowed` | `.Services.PaidServicesAllowed` | |
+
+**Dependency chain:** Group 5 requires Group 2 (org GUID for domain listing).
+
+##### GetSpaces_Model — `GetSpaces()`
+
+| Group | V3 API Call(s) | V2 Fields | V3 Field Path | Notes |
+|---|---|---|---|---|
+| **1: Spaces** | `Spaces.ListAll()` | `Guid` | `.GUID` | Single call |
+| | | `Name` | `.Name` | |
+
+##### GetOrgUsers_Model — `GetOrgUsers(orgName string, args ...string)`
+
+| Group | V3 API Call(s) | V2 Fields | V3 Field Path | Notes |
+|---|---|---|---|---|
+| **1: Roles+Users** | `Organizations.Single(name)` + `Roles.ListIncludeUsersAll(orgGUID)` | `Guid` | (included User).GUID | Uses `include` — single call for roles+users |
+| | | `Username` | (included User).Username | Pointer |
+| | | `Roles` | `role.Type` aggregated per user | Role types: `organization_user`, `organization_manager`, etc. |
+| | | `IsAdmin` | — | **Not available in V3.** V2 derived this from UAA admin scope. Always `false` in generated wrappers. |
+
+**IsAdmin caveat:** The V2 model includes `IsAdmin` but CAPI V3 roles do not expose global admin status. Rabobank omits it (always `false`). The generator SHOULD warn if this field is requested and document the limitation in the generated code.
+
+##### GetSpaceUsers_Model — `GetSpaceUsers(orgName, spaceName string)`
+
+| Group | V3 API Call(s) | V2 Fields | V3 Field Path | Notes |
+|---|---|---|---|---|
+| **1: Roles+Users** | `Organizations.Single(orgName)` + `Spaces.Single(spaceName, orgGUID)` + `Roles.ListIncludeUsersAll(spaceGUID)` | `Guid` | (included User).GUID | Uses `include` |
+| | | `Username` | (included User).Username | Pointer |
+| | | `Roles` | `role.Type` aggregated per user | Role types: `space_developer`, `space_manager`, etc. |
+| | | `IsAdmin` | — | **Not available in V3.** See GetOrgUsers note. |
+
+##### Rabobank `include` Parameter Usage Summary
+
+The Rabobank implementation uses go-cfclient's `include` parameters in three places to reduce API calls:
+
+| Method | `include` Call | What It Avoids |
+|---|---|---|
+| `GetApp` (Services) | `ServiceCredentialBindings.ListIncludeServiceInstancesAll` | Separate `ServiceInstances.Get()` per binding |
+| `GetServices` (Apps) | `ServiceCredentialBindings.ListIncludeAppsAll` | Separate `Applications.Get()` per binding |
+| `GetOrgUsers` / `GetSpaceUsers` | `Roles.ListIncludeUsersAll` | Separate `Users.Get()` per role |
+
+Rabobank does **not** use `include` for service plan → offering resolution (`GetServices`, `GetService`), making 2 separate GET calls per service instance. The generator SHOULD use `include` parameters where go-cfclient supports them.
+
+##### Fields Not Available in V3
+
+| V2 Field | Model | Reason |
+|---|---|---|
+| `IsAdmin` | `GetOrgUsers_Model`, `GetSpaceUsers_Model` | V2 derived from UAA admin scope; V3 roles are CAPI-only |
+| `DetectedStartCommand` (distinct from `Command`) | `GetAppModel` | V3 does not distinguish detected vs explicit start command |
+| `GetAppsModel.Routes[].Domain.OwningOrganizationGuid` | `GetAppsModel` | Available but requires additional `Domains.Get()` per route domain — N+1 |
+| `GetAppsModel.Routes[].Domain.Shared` | `GetAppsModel` | Same as above |
+
+#### V2 Plugin Model Struct Reference
+
+Complete Go type definitions from [`plugin/models/`](https://github.com/cloudfoundry/cli/tree/main/plugin/models) in the CF CLI source. These are the types returned by the V2 domain methods and populated by the generated wrappers.
+
+##### App Models
+
+```go
+// GetAppModel — returned by GetApp(appName string)
+type GetAppModel struct {
+    Guid                 string
+    Name                 string
+    BuildpackUrl         string
+    Command              string
+    DetectedStartCommand string
+    DiskQuota            int64 // in Megabytes
+    EnvironmentVars      map[string]interface{}
+    InstanceCount        int
+    Memory               int64 // in Megabytes
+    RunningInstances     int
+    HealthCheckTimeout   int
+    State                string
+    SpaceGuid            string
+    PackageUpdatedAt     *time.Time
+    PackageState         string
+    StagingFailedReason  string
+    Stack                *GetApp_Stack
+    Instances            []GetApp_AppInstanceFields
+    Routes               []GetApp_RouteSummary
+    Services             []GetApp_ServiceSummary
+}
+
+type GetApp_Stack struct {
+    Guid, Name, Description string
+}
+
+type GetApp_AppInstanceFields struct {
+    State     string
+    Details   string
+    Since     time.Time
+    CpuUsage  float64 // percentage
+    DiskQuota int64   // in bytes
+    DiskUsage int64
+    MemQuota  int64
+    MemUsage  int64
+}
+
+type GetApp_RouteSummary struct {
+    Guid   string
+    Host   string
+    Domain GetApp_DomainFields
+    Path   string
+    Port   int
+}
+
+type GetApp_DomainFields struct {
+    Guid, Name string
+}
+
+type GetApp_ServiceSummary struct {
+    Guid, Name string
+}
+
+// GetAppsModel — returned by GetApps()
+type GetAppsModel struct {
+    Name             string
+    Guid             string
+    State            string
+    TotalInstances   int
+    RunningInstances int
+    Memory           int64
+    DiskQuota        int64
+    Routes           []GetAppsRouteSummary
+}
+
+type GetAppsRouteSummary struct {
+    Guid   string
+    Host   string
+    Domain GetAppsDomainFields
+}
+
+type GetAppsDomainFields struct {
+    Guid                   string
+    Name                   string
+    OwningOrganizationGuid string
+    Shared                 bool
+}
+```
+
+##### Service Models
+
+```go
+// GetService_Model — returned by GetService(serviceName string)
+type GetService_Model struct {
+    Guid            string
+    Name            string
+    DashboardUrl    string
+    IsUserProvided  bool
+    ServiceOffering GetService_ServiceFields
+    ServicePlan     GetService_ServicePlan
+    LastOperation   GetService_LastOperation
+}
+
+type GetService_LastOperation struct {
+    Type, State, Description string
+    CreatedAt, UpdatedAt     string
+}
+
+type GetService_ServicePlan struct {
+    Name, Guid string
+}
+
+type GetService_ServiceFields struct {
+    Name, DocumentationUrl string
+}
+
+// GetServices_Model — returned by GetServices()
+type GetServices_Model struct {
+    Guid             string
+    Name             string
+    ServicePlan      GetServices_ServicePlan
+    Service          GetServices_ServiceFields
+    LastOperation    GetServices_LastOperation
+    ApplicationNames []string
+    IsUserProvided   bool
+}
+
+type GetServices_LastOperation struct {
+    Type, State string
+}
+
+type GetServices_ServicePlan struct {
+    Guid, Name string
+}
+
+type GetServices_ServiceFields struct {
+    Name string
+}
+```
+
+##### Org Models
+
+```go
+// GetOrg_Model — returned by GetOrg(orgName string)
+type GetOrg_Model struct {
+    Guid            string
+    Name            string
+    QuotaDefinition QuotaFields
+    Spaces          []GetOrg_Space
+    Domains         []GetOrg_Domains
+    SpaceQuotas     []GetOrg_SpaceQuota
+}
+
+type GetOrg_Space struct {
+    Guid, Name string
+}
+
+type GetOrg_Domains struct {
+    Guid                   string
+    Name                   string
+    OwningOrganizationGuid string
+    Shared                 bool
+}
+
+type GetOrg_SpaceQuota struct {
+    Guid                    string
+    Name                    string
+    MemoryLimit             int64
+    InstanceMemoryLimit     int64
+    RoutesLimit             int
+    ServicesLimit           int
+    NonBasicServicesAllowed bool
+}
+
+// Shared quota type used by GetOrg_Model and Organization
+type QuotaFields struct {
+    Guid                    string
+    Name                    string
+    MemoryLimit             int64
+    InstanceMemoryLimit     int64
+    RoutesLimit             int
+    ServicesLimit           int
+    NonBasicServicesAllowed bool
+}
+
+// GetOrgs_Model — returned by GetOrgs()
+type GetOrgs_Model struct {
+    Guid, Name string
+}
+```
+
+##### Space Models
+
+```go
+// GetSpace_Model — returned by GetSpace(spaceName string)
+type GetSpace_Model struct {
+    GetSpaces_Model                          // embeds Guid, Name
+    Organization     GetSpace_Orgs
+    Applications     []GetSpace_Apps
+    ServiceInstances []GetSpace_ServiceInstance
+    Domains          []GetSpace_Domains
+    SecurityGroups   []GetSpace_SecurityGroup
+    SpaceQuota       GetSpace_SpaceQuota
+}
+
+type GetSpace_Orgs struct {
+    Guid, Name string
+}
+
+type GetSpace_Apps struct {
+    Name, Guid string
+}
+
+type GetSpace_ServiceInstance struct {
+    Guid, Name string
+}
+
+type GetSpace_Domains struct {
+    Guid                   string
+    Name                   string
+    OwningOrganizationGuid string
+    Shared                 bool
+}
+
+type GetSpace_SecurityGroup struct {
+    Name  string
+    Guid  string
+    Rules []map[string]interface{}
+}
+
+type GetSpace_SpaceQuota struct {
+    Guid                    string
+    Name                    string
+    MemoryLimit             int64
+    InstanceMemoryLimit     int64
+    RoutesLimit             int
+    ServicesLimit           int
+    NonBasicServicesAllowed bool
+}
+
+// GetSpaces_Model — returned by GetSpaces()
+type GetSpaces_Model struct {
+    Guid, Name string
+}
+```
+
+##### User Models
+
+```go
+// GetOrgUsers_Model — returned by GetOrgUsers(orgName string, args ...string)
+type GetOrgUsers_Model struct {
+    Guid     string
+    Username string
+    IsAdmin  bool     // Not available in V3 — always false
+    Roles    []string
+}
+
+// GetSpaceUsers_Model — returned by GetSpaceUsers(orgName, spaceName string)
+type GetSpaceUsers_Model struct {
+    Guid     string
+    Username string
+    IsAdmin  bool     // Not available in V3 — always false
+    Roles    []string
+}
+```
+
+##### Context Models (Pass-through — No Wrappers Needed)
+
+```go
+// Organization — returned by GetCurrentOrg()
+type Organization struct {
+    OrganizationFields
+}
+type OrganizationFields struct {
+    Guid            string
+    Name            string
+    QuotaDefinition QuotaFields
+}
+
+// Space — returned by GetCurrentSpace()
+type Space struct {
+    SpaceFields
+}
+type SpaceFields struct {
+    Guid, Name string
+}
+
+// GetOauthToken_Model — returned by GetOauthToken()  [not commonly used]
+type GetOauthToken_Model struct {
+    Token string
+}
+```
+
+These context models are populated by the host via RPC and pass through unchanged. They do not need generated wrappers.
 
 ### Error Handling at the Boundary
 
@@ -1208,6 +1801,9 @@ As a result, all existing CAPI client libraries — Go, Java, Python — are **h
 - [CLI Plugin Interface V3 RFC](rfc-draft-cli-plugin-interface-v3.md) — The main RFC defining the new plugin interface
 - [Plugin Survey — Rabobank Case Study](plugin-survey.md#case-study-rabobank-guest-side-transitional-wrapper) — Detailed analysis of the Rabobank transitional wrapper
 - [Rabobank cf-plugins](https://github.com/rabobank/cf-plugins) — The production transitional wrapper library
+- [CAPI V3 API Documentation](https://v3-apidocs.cloudfoundry.org) — Official Cloud Foundry V3 API reference
+- [CAPI V2 API Documentation](https://v2-apidocs.cloudfoundry.org) — Legacy Cloud Foundry V2 API reference (deprecated)
+- [CF CLI Plugin Models](https://github.com/cloudfoundry/cli/tree/main/plugin/models) — V2 plugin model type definitions (`plugin_models.*`)
 - [go-cfclient](https://github.com/cloudfoundry/go-cfclient) — Cloud Foundry V3 Go client library
 - [cf-java-client](https://github.com/cloudfoundry/cf-java-client) — Cloud Foundry Java client library
 - [cf-python-client](https://github.com/cloudfoundry-community/cf-python-client) — Cloud Foundry Python client library

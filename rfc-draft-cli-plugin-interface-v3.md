@@ -748,6 +748,9 @@ func (p *MyPlugin) Run(ctx pluginapi.PluginContext, args []string) {
 - [cloudfoundry/cli#3621 — New Plugin Interface](https://github.com/cloudfoundry/cli/issues/3621)
 - [Current plugin interface — code.cloudfoundry.org/cli/plugin](https://pkg.go.dev/code.cloudfoundry.org/cli/plugin)
 - [go-cfclient — Cloud Foundry V3 Go client library](https://github.com/cloudfoundry/go-cfclient)
+- [CAPI V3 API Documentation](https://v3-apidocs.cloudfoundry.org) — Official Cloud Foundry V3 API reference
+- [CAPI V2 API Documentation](https://v2-apidocs.cloudfoundry.org) — Legacy Cloud Foundry V2 API reference (deprecated)
+- [CF CLI Plugin Models](https://github.com/cloudfoundry/cli/tree/main/plugin/models) — V2 plugin model type definitions (`plugin_models.*`)
 - [Semantic Versioning 2.0.0](https://semver.org/)
 - [JSON-RPC 2.0 Specification](https://www.jsonrpc.org/specification)
 - [docopt — Command-line interface description language](http://docopt.org/)
