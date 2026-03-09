@@ -61,7 +61,14 @@
 - [x] Define complete V2→V3 field mapping reference for all plugin models — see [transitional RFC field mapping](rfc-draft-plugin-transitional-migration.md#complete-v2v3-field-mapping-reference)
 - [x] Document V2 plugin model struct reference — see [transitional RFC model reference](rfc-draft-plugin-transitional-migration.md#v2-plugin-model-struct-reference)
 - [x] Implement `cf-plugin-migrate scan` (go/ast-based audit → YAML config) — see [transitional RFC scan design](rfc-draft-plugin-transitional-migration.md#automated-audit-cf-plugin-migrate-scan), [scanner test results](cf-plugin-migrate/SCANNER_TEST_RESULTS.md)
-- [ ] Implement `cf-plugin-migrate generate` (YAML config → Go source output)
+- [x] Implement `cf-plugin-migrate generate` (YAML config → Go source output) — see [design doc phases](cf-plugin-migrate-design.md#generate-implementation-phases)
+  - [x] Phase A: Config parsing, group resolution, generator skeleton
+  - [x] Phase B: Session pass-through + V2Compat struct — tested with cf-targets-plugin (zero-change migration: drop in generated file, `make build`, `cf install-plugin`, `cf targets` works)
+  - [x] Phase C: Simple domain methods (GetOrgs, GetSpaces)
+  - [x] Phase D: Medium domain methods (GetService, GetServices, GetOrg, GetSpace, GetOrgUsers, GetSpaceUsers)
+  - [x] Phase E: Complex domain methods (GetApps, GetApp — dependency chains, per-item calls) — tested with OCF Scheduler against live CAPI V3 (v3.180.0): `cf create-job` resolved app via V3 `Applications.Single`
+  - [ ] Phase F: Scanner enhancement — `CliCommand`/`cf curl` analysis (endpoint URL extraction, JSON unmarshal tracing, V2→V3 endpoint mapping)
+  - [ ] Phase G: Polish — golden file tests, CLI flags, error messages
 - [ ] Document token lifecycle pattern (`config.TokenProvider()` for long-running plugins)
 - [ ] Proof-of-concept: Analyze and walk through list-services migration (Tier 1: simple)
 - [x] Proof-of-concept: Analyze and walk through OCF Scheduler migration (Tier 2: moderate) — see [transitional RFC worked example](rfc-draft-plugin-transitional-migration.md#worked-example-ocf-scheduler-plugin)

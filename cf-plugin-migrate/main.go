@@ -9,6 +9,7 @@ import (
 	"runtime/debug"
 	"strings"
 
+	"cf-plugin-migrate/generator"
 	"cf-plugin-migrate/scanner"
 )
 
@@ -37,8 +38,7 @@ func main() {
 	case "ast":
 		runAstDump()
 	case "generate":
-		fmt.Fprintln(os.Stderr, "generate: not yet implemented")
-		os.Exit(1)
+		runGenerate()
 	case "version":
 		printVersion()
 	default:
@@ -113,6 +113,42 @@ func runAstDump() {
 	if err := ast.Print(fset, f); err != nil {
 		fmt.Fprintf(os.Stderr, "Error printing AST: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+func runGenerate() {
+	configPath := "cf-plugin-migrate.yml"
+	outputPath := "v2compat_generated.go"
+
+	// Allow overriding paths via args: generate [config] [output]
+	args := os.Args[2:]
+	if len(args) >= 1 {
+		configPath = args[0]
+	}
+	if len(args) >= 2 {
+		outputPath = args[1]
+	}
+
+	config, err := generator.LoadConfig(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	output, err := generator.Generate(config)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if outputPath == "-" {
+		os.Stdout.Write(output)
+	} else {
+		if err := os.WriteFile(outputPath, output, 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", outputPath, err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "Generated %s (%d bytes)\n", outputPath, len(output))
 	}
 }
 
