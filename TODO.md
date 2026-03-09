@@ -60,7 +60,7 @@
 - [x] Define `cf-plugin-migrate.yml` YAML schema for generated V2 compatibility wrappers — see [transitional RFC YAML schema](rfc-draft-plugin-transitional-migration.md#yaml-schema-cf-plugin-migrateyml)
 - [x] Define complete V2→V3 field mapping reference for all plugin models — see [transitional RFC field mapping](rfc-draft-plugin-transitional-migration.md#complete-v2v3-field-mapping-reference)
 - [x] Document V2 plugin model struct reference — see [transitional RFC model reference](rfc-draft-plugin-transitional-migration.md#v2-plugin-model-struct-reference)
-- [ ] Implement `cf-plugin-migrate scan` (go/ast-based audit → YAML config) — see [transitional RFC scan design](rfc-draft-plugin-transitional-migration.md#automated-audit-cf-plugin-migrate-scan)
+- [x] Implement `cf-plugin-migrate scan` (go/ast-based audit → YAML config) — see [transitional RFC scan design](rfc-draft-plugin-transitional-migration.md#automated-audit-cf-plugin-migrate-scan), [scanner test results](cf-plugin-migrate/SCANNER_TEST_RESULTS.md)
 - [ ] Implement `cf-plugin-migrate generate` (YAML config → Go source output)
 - [ ] Document token lifecycle pattern (`config.TokenProvider()` for long-running plugins)
 - [ ] Proof-of-concept: Analyze and walk through list-services migration (Tier 1: simple)

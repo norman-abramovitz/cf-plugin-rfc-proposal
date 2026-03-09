@@ -72,6 +72,8 @@ cf-plugin-migrate/
     mapping.go             # field-to-API-call dependency groups (Go data)
 ```
 
+**Build targets:** Linux and Darwin, amd64 and arm64. Release builds use goreleaser with ldflags version injection. Local builds default to version `dev` with VCS metadata from `runtime/debug`.
+
 **Dependencies:**
 
 - `go/ast`, `go/types`, `go/parser` — for the scanner (stdlib, no external deps)
