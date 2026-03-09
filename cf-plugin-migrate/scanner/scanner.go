@@ -13,8 +13,9 @@ import (
 
 // ScanResult holds the aggregated scan output.
 type ScanResult struct {
-	Package string
-	Methods map[string]*MethodResult
+	Package         string
+	Methods         map[string]*MethodResult
+	CliCommandCalls []*CliCommandCall
 }
 
 // MethodResult holds detected fields for one V2 method.
@@ -114,6 +115,7 @@ func scanFile(path string, result *ScanResult) error {
 			continue
 		}
 		scanFunction(fset, path, fn, result)
+		scanFunctionForCliCommands(fset, path, fn, result)
 	}
 
 	return nil

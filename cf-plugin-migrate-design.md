@@ -465,47 +465,37 @@ The `generate` subcommand is implemented in phases, each producing testable outp
 - 5 lines changed in `main.go` (wrap the connection)
 - 0 changes to any other source file — `GetApp` calls in `create-job.go` and `create-call.go` transparently use V3
 
-### Phase F: Scanner Enhancement — `CliCommand` / `cf curl` Analysis
+### Phase F: Scanner Enhancement — `CliCommand` / `cf curl` Analysis ✅
 
-The scanner currently detects only the 10 domain methods. Many plugins also use `CliCommand` or `CliCommandWithoutTerminalOutput` to call `cf curl` against CAPI endpoints directly. These calls are not opaque — the AST can trace the full data flow:
+The scanner now detects **all** `CliCommand` and `CliCommandWithoutTerminalOutput` calls — not just `curl`. Since both methods are legacy-only (not available in the V3 plugin interface), every call site needs migration attention.
 
-**What the scanner can extract:**
+**What the scanner detects:**
 
-1. **Detect the call** — `cliConnection.CliCommandWithoutTerminalOutput("curl", "v2/apps")` or `cliConnection.CliCommand("curl", "/v3/spaces/...")`
-2. **Extract the endpoint URL** — the string literal or variable passed as the curl argument (e.g., `"v2/apps"`, `"v3/service_instances"`)
-3. **Trace the result** — the `[]string` return is typically `json.Unmarshal([]byte(output[0]), &targetStruct)`
-4. **Walk the target struct** — resolve the struct type definition to find the JSON field tags and Go field names
-5. **Track field access** — which fields of the unmarshalled struct are actually used downstream
+1. **All CliCommand calls** — `CliCommand("push", "myapp")`, `CliCommand("apps")`, `CliCommandWithoutTerminalOutput("bind-service", appName, svcName)`, etc. Extracts the command name and literal arguments. Variable arguments shown as `(var: name)`.
 
-**Example analysis** (`test_rpc_server_example`):
+2. **Curl-specific analysis** — when the command is `"curl"`, additional data flow tracing:
+   - **Endpoint extraction** — string literal or variable (with best-effort variable resolution from earlier assignments in the same function)
+   - **json.Unmarshal tracing** — detects `json.Unmarshal([]byte(output[0]), &target)` and `json.Unmarshal([]byte(strings.Join(output, "")), &target)` patterns, linking the curl result to the target variable
+   - **Target type detection** — resolves composite literal types (e.g., `apps := AppsModel{}` → type `AppsModel`)
+   - **Field access tracking** — tracks field access on target variables and range variables over target fields
+   - **V2→V3 endpoint mapping** — 20 known V2 endpoints mapped to V3 equivalents with migration notes
 
-```go
-output, err := cliConnection.CliCommandWithoutTerminalOutput("curl", nextURL)
-json.Unmarshal([]byte(output[0]), &apps)
-// apps.Resources[].Entity.Name, apps.Resources[].Entity.State
-// apps.NextURL (pagination)
-```
+**Implementation:** `scanner/curl.go` — `CliCommandCall` type, `V2EndpointMap`, `scanFunctionForCliCommands()`, `extractCliCommandCall()`, `linkUnmarshal()`
 
-Scanner report:
-- Endpoint: `v2/apps` → V3 equivalent: `GET /v3/apps`
-- Response fields used: `Entity.Name` → `name`, `Entity.State` → `state`
-- Pagination: V2 `next_url` → V3 pagination
+**Test milestone:** 42 scanner tests pass (25 existing + 17 new: 12 curl-specific + 5 non-curl CliCommand detection, YAML output, summary output, mixed detection)
 
-**V2-to-V3 endpoint mapping data:**
+**Validated against real plugins:**
 
-The scanner needs a mapping of known V2 curl endpoints to their V3 equivalents, similar to how `V2Models` maps domain method fields. Common patterns:
+- `test_rpc_server_example` — detected `CliCommandWithoutTerminalOutput("curl", nextURL)`, resolved `nextURL` → `"v2/apps"`, mapped to `/v3/apps`, traced unmarshal to `AppsModel`, tracked `NextURL` and `Resources` field access
+- `mysql-cli-plugin` — detected 14 CliCommand calls: `bind-service`, `create-service`, `delete`, `push`, `start`, `logs`, `rename-service`, `service-key`, `create-service-key`, `delete-service-key`, 2× `curl`, 1× dynamic command via variable, plus `GetService` domain method
+- `ocf-scheduler-cf-plugin` — correctly detected no CliCommand calls (uses domain methods only)
 
-| V2 Endpoint | V3 Equivalent | Notes |
-|---|---|---|
-| `v2/apps` | `/v3/apps` | Response structure differs (V2 `entity`/`metadata` → V3 flat) |
-| `v2/spaces` | `/v3/spaces` | |
-| `v2/organizations` | `/v3/organizations` | |
-| `v2/service_instances` | `/v3/service_instances` | |
-| `v2/routes` | `/v3/routes` | |
-| `v2/domains` | `/v3/domains` | Private/shared distinction changed |
-| `v2/users` | `/v3/users` + `/v3/roles` | Roles separated in V3 |
+**Scope:** Scanner output only — reports findings for manual migration. The `cli_commands` YAML section documents each call site with command, args, and (for curl) V3 endpoint mapping. No code generation for arbitrary CliCommand replacements.
 
-**Scope:** This phase produces scanner output only — it reports findings and flags the calls for manual migration. The generator does not auto-generate replacements for arbitrary `cf curl` calls, but the report tells the developer exactly what V3 endpoint and fields to use.
+**Known limitations:**
+- Cross-function analysis not supported (range vars in calling function not traced)
+- Variable endpoint resolution limited to string literal assignments in the same function
+- Struct type resolution from `var` declarations (without composite literals) not yet supported
 
 ### Phase G: Polish
 

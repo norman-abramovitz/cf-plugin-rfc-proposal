@@ -651,6 +651,532 @@ func TestCheckWriteErr(t *testing.T) {
 	}
 }
 
+// --- Curl detection tests ---
+
+func TestCurlDetectLiteralEndpoint(t *testing.T) {
+	source := `package foo
+
+import "encoding/json"
+
+func example(conn CLI) {
+	output, _ := conn.CliCommandWithoutTerminalOutput("curl", "v2/apps")
+	var apps struct{ Name string }
+	json.Unmarshal([]byte(output[0]), &apps)
+	_ = apps.Name
+}
+`
+	result := scanSource(t, source)
+
+	if len(result.CliCommandCalls) != 1 {
+		t.Fatalf("expected 1 curl call, got %d", len(result.CliCommandCalls))
+	}
+	cc := result.CliCommandCalls[0]
+	if cc.Method != "CliCommandWithoutTerminalOutput" {
+		t.Errorf("expected CliCommandWithoutTerminalOutput, got %q", cc.Method)
+	}
+	if cc.Endpoint != "v2/apps" {
+		t.Errorf("expected endpoint v2/apps, got %q", cc.Endpoint)
+	}
+	if cc.ResultVar != "output" {
+		t.Errorf("expected result var output, got %q", cc.ResultVar)
+	}
+	if cc.V3Endpoint != "/v3/apps" {
+		t.Errorf("expected V3 endpoint /v3/apps, got %q", cc.V3Endpoint)
+	}
+	if cc.TargetVar != "apps" {
+		t.Errorf("expected target var apps, got %q", cc.TargetVar)
+	}
+	if !cc.Fields["Name"] {
+		t.Error("expected Name field to be tracked")
+	}
+}
+
+func TestCurlDetectVariableEndpoint(t *testing.T) {
+	source := `package foo
+
+import "encoding/json"
+
+func example(conn CLI) {
+	nextURL := "v2/spaces"
+	output, _ := conn.CliCommandWithoutTerminalOutput("curl", nextURL)
+	var spaces struct{ Guid string }
+	json.Unmarshal([]byte(output[0]), &spaces)
+	_ = spaces.Guid
+}
+`
+	result := scanSource(t, source)
+
+	if len(result.CliCommandCalls) != 1 {
+		t.Fatalf("expected 1 curl call, got %d", len(result.CliCommandCalls))
+	}
+	cc := result.CliCommandCalls[0]
+	if cc.Endpoint != "v2/spaces" {
+		t.Errorf("expected resolved endpoint v2/spaces, got %q", cc.Endpoint)
+	}
+	if cc.EndpointVar != "nextURL" {
+		t.Errorf("expected endpoint var nextURL, got %q", cc.EndpointVar)
+	}
+	if cc.V3Endpoint != "/v3/spaces" {
+		t.Errorf("expected V3 endpoint /v3/spaces, got %q", cc.V3Endpoint)
+	}
+}
+
+func TestCurlDetectCliCommand(t *testing.T) {
+	source := `package foo
+
+func example(conn CLI) {
+	output, _ := conn.CliCommand("curl", "/v2/organizations")
+	_ = output
+}
+`
+	result := scanSource(t, source)
+
+	if len(result.CliCommandCalls) != 1 {
+		t.Fatalf("expected 1 curl call, got %d", len(result.CliCommandCalls))
+	}
+	cc := result.CliCommandCalls[0]
+	if cc.Method != "CliCommand" {
+		t.Errorf("expected CliCommand, got %q", cc.Method)
+	}
+	if cc.Endpoint != "/v2/organizations" {
+		t.Errorf("expected /v2/organizations, got %q", cc.Endpoint)
+	}
+	if cc.V3Endpoint != "/v3/organizations" {
+		t.Errorf("expected V3 endpoint /v3/organizations, got %q", cc.V3Endpoint)
+	}
+}
+
+func TestCurlCompositeLitType(t *testing.T) {
+	source := `package foo
+
+import "encoding/json"
+
+type AppsModel struct {
+	Resources []string
+	NextURL   string
+}
+
+func example(conn CLI) {
+	output, _ := conn.CliCommandWithoutTerminalOutput("curl", "v2/apps")
+	apps := AppsModel{}
+	json.Unmarshal([]byte(output[0]), &apps)
+	_ = apps.Resources
+	_ = apps.NextURL
+}
+`
+	result := scanSource(t, source)
+
+	if len(result.CliCommandCalls) != 1 {
+		t.Fatalf("expected 1 curl call, got %d", len(result.CliCommandCalls))
+	}
+	cc := result.CliCommandCalls[0]
+	if cc.TargetType != "AppsModel" {
+		t.Errorf("expected target type AppsModel, got %q", cc.TargetType)
+	}
+	if !cc.Fields["Resources"] {
+		t.Error("expected Resources field")
+	}
+	if !cc.Fields["NextURL"] {
+		t.Error("expected NextURL field")
+	}
+}
+
+func TestCurlRangeVariableTracking(t *testing.T) {
+	source := `package foo
+
+import "encoding/json"
+
+type AppsModel struct {
+	Resources []AppModel
+}
+type AppModel struct {
+	Entity EntityModel
+}
+type EntityModel struct {
+	Name  string
+	State string
+}
+
+func example(conn CLI) {
+	output, _ := conn.CliCommandWithoutTerminalOutput("curl", "v2/apps")
+	apps := AppsModel{}
+	json.Unmarshal([]byte(output[0]), &apps)
+	for _, app := range apps.Resources {
+		_ = app.Entity.Name
+		_ = app.Entity.State
+	}
+}
+`
+	result := scanSource(t, source)
+
+	if len(result.CliCommandCalls) != 1 {
+		t.Fatalf("expected 1 curl call, got %d", len(result.CliCommandCalls))
+	}
+	cc := result.CliCommandCalls[0]
+	if !cc.Fields["Resources"] {
+		t.Error("expected Resources field (from range)")
+	}
+	if !cc.Fields["Resources.Entity.Name"] {
+		t.Error("expected Resources.Entity.Name field")
+	}
+	if !cc.Fields["Resources.Entity.State"] {
+		t.Error("expected Resources.Entity.State field")
+	}
+}
+
+func TestNonCurlCliCommandDetected(t *testing.T) {
+	source := `package foo
+
+func example(conn CLI) {
+	output, _ := conn.CliCommand("push", "myapp")
+	_ = output
+}
+`
+	result := scanSource(t, source)
+
+	if len(result.CliCommandCalls) != 1 {
+		t.Fatalf("expected 1 CliCommand call, got %d", len(result.CliCommandCalls))
+	}
+	cc := result.CliCommandCalls[0]
+	if cc.Command != "push" {
+		t.Errorf("expected command push, got %q", cc.Command)
+	}
+	if cc.Method != "CliCommand" {
+		t.Errorf("expected method CliCommand, got %q", cc.Method)
+	}
+	if len(cc.Args) != 1 || cc.Args[0] != "myapp" {
+		t.Errorf("expected args [myapp], got %v", cc.Args)
+	}
+	// Non-curl calls should not have curl-specific fields
+	if cc.V3Endpoint != "" {
+		t.Errorf("expected no V3 endpoint for non-curl call, got %q", cc.V3Endpoint)
+	}
+}
+
+func TestNonCurlCliCommandYAMLOutput(t *testing.T) {
+	result := &ScanResult{
+		Package: "foo",
+		Methods: make(map[string]*MethodResult),
+		CliCommandCalls: []*CliCommandCall{
+			{
+				File:    "main.go",
+				Line:    10,
+				Method:  "CliCommand",
+				Command: "apps",
+				Fields:  make(map[string]bool),
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := result.WriteYAML(&buf); err != nil {
+		t.Fatal(err)
+	}
+
+	yaml := buf.String()
+	for _, want := range []string{
+		"cli_commands:",
+		"command: apps",
+		"method: CliCommand",
+	} {
+		if !strings.Contains(yaml, want) {
+			t.Errorf("YAML missing %q:\n%s", want, yaml)
+		}
+	}
+	// Should NOT have curl-specific fields
+	if strings.Contains(yaml, "endpoint:") {
+		t.Errorf("non-curl call should not have endpoint field:\n%s", yaml)
+	}
+}
+
+func TestNonCurlCliCommandSummaryOutput(t *testing.T) {
+	result := &ScanResult{
+		Package: "foo",
+		Methods: make(map[string]*MethodResult),
+		CliCommandCalls: []*CliCommandCall{
+			{
+				File:    "main.go",
+				Line:    10,
+				Method:  "CliCommand",
+				Command: "apps",
+				Fields:  make(map[string]bool),
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	result.WriteSummary(&buf)
+	out := buf.String()
+
+	if !strings.Contains(out, `CliCommand("apps"`) {
+		t.Errorf("expected CliCommand(\"apps\") in summary:\n%s", out)
+	}
+	if !strings.Contains(out, "legacy") {
+		t.Errorf("expected 'legacy' note in summary:\n%s", out)
+	}
+}
+
+func TestMultipleCliCommands(t *testing.T) {
+	source := `package foo
+
+import "encoding/json"
+
+func example(conn CLI) {
+	output, _ := conn.CliCommand("apps")
+	_ = output
+
+	result, _ := conn.CliCommandWithoutTerminalOutput("curl", "v2/spaces")
+	var spaces struct{ Name string }
+	json.Unmarshal([]byte(result[0]), &spaces)
+	_ = spaces.Name
+}
+`
+	result := scanSource(t, source)
+
+	if len(result.CliCommandCalls) != 2 {
+		t.Fatalf("expected 2 CliCommand calls, got %d", len(result.CliCommandCalls))
+	}
+
+	// First: non-curl
+	if result.CliCommandCalls[0].Command != "apps" {
+		t.Errorf("expected first command apps, got %q", result.CliCommandCalls[0].Command)
+	}
+
+	// Second: curl with analysis
+	cc := result.CliCommandCalls[1]
+	if cc.Command != "curl" {
+		t.Errorf("expected second command curl, got %q", cc.Command)
+	}
+	if cc.V3Endpoint != "/v3/spaces" {
+		t.Errorf("expected V3 endpoint /v3/spaces, got %q", cc.V3Endpoint)
+	}
+	if cc.TargetVar != "spaces" {
+		t.Errorf("expected target var spaces, got %q", cc.TargetVar)
+	}
+}
+
+func TestCurlNoUnmarshalNoFields(t *testing.T) {
+	// Curl call with no json.Unmarshal — should still be detected but with no target/fields
+	source := `package foo
+
+func example(conn CLI) {
+	output, _ := conn.CliCommandWithoutTerminalOutput("curl", "/v2/buildpacks")
+	_ = output
+}
+`
+	result := scanSource(t, source)
+
+	if len(result.CliCommandCalls) != 1 {
+		t.Fatalf("expected 1 curl call, got %d", len(result.CliCommandCalls))
+	}
+	cc := result.CliCommandCalls[0]
+	if cc.TargetVar != "" {
+		t.Errorf("expected no target var, got %q", cc.TargetVar)
+	}
+	if len(cc.Fields) != 0 {
+		t.Errorf("expected no fields, got %v", cc.Fields)
+	}
+}
+
+func TestCurlUnknownEndpoint(t *testing.T) {
+	source := `package foo
+
+func example(conn CLI) {
+	output, _ := conn.CliCommand("curl", "/v2/some_custom_endpoint")
+	_ = output
+}
+`
+	result := scanSource(t, source)
+
+	if len(result.CliCommandCalls) != 1 {
+		t.Fatalf("expected 1 curl call, got %d", len(result.CliCommandCalls))
+	}
+	cc := result.CliCommandCalls[0]
+	if cc.V3Endpoint != "" {
+		t.Errorf("expected no V3 endpoint for unknown path, got %q", cc.V3Endpoint)
+	}
+}
+
+func TestCurlEndpointWithQueryParams(t *testing.T) {
+	source := `package foo
+
+func example(conn CLI) {
+	output, _ := conn.CliCommand("curl", "/v2/apps?q=name:myapp")
+	_ = output
+}
+`
+	result := scanSource(t, source)
+
+	if len(result.CliCommandCalls) != 1 {
+		t.Fatalf("expected 1 curl call, got %d", len(result.CliCommandCalls))
+	}
+	cc := result.CliCommandCalls[0]
+	if cc.V3Endpoint != "/v3/apps" {
+		t.Errorf("expected /v3/apps (query stripped), got %q", cc.V3Endpoint)
+	}
+}
+
+func TestCurlYAMLOutput(t *testing.T) {
+	result := &ScanResult{
+		Package: "foo",
+		Methods: make(map[string]*MethodResult),
+		CliCommandCalls: []*CliCommandCall{
+			{
+				File:       "main.go",
+				Line:       42,
+				Method:     "CliCommandWithoutTerminalOutput",
+				Command:    "curl",
+				Endpoint:   "v2/apps",
+				ResultVar:  "output",
+				TargetVar:  "apps",
+				TargetType: "AppsModel",
+				Fields:     map[string]bool{"Resources.Entity.Name": true, "NextURL": true},
+				V3Endpoint: "/v3/apps",
+				V3Notes:    "V2 entity/metadata envelope → V3 flat resources",
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := result.WriteYAML(&buf); err != nil {
+		t.Fatal(err)
+	}
+
+	yaml := buf.String()
+	for _, want := range []string{
+		"cli_commands:",
+		"command: curl",
+		"file: main.go",
+		"line: 42",
+		"method: CliCommandWithoutTerminalOutput",
+		"endpoint: v2/apps",
+		"v3_endpoint: /v3/apps",
+		"target_type: AppsModel",
+		"fields:",
+		"NextURL",
+		"Resources.Entity.Name",
+	} {
+		if !strings.Contains(yaml, want) {
+			t.Errorf("YAML missing %q:\n%s", want, yaml)
+		}
+	}
+}
+
+func TestCurlSummaryOutput(t *testing.T) {
+	result := &ScanResult{
+		Package: "foo",
+		Methods: make(map[string]*MethodResult),
+		CliCommandCalls: []*CliCommandCall{
+			{
+				File:       "main.go",
+				Line:       42,
+				Method:     "CliCommandWithoutTerminalOutput",
+				Command:    "curl",
+				Endpoint:   "v2/apps",
+				TargetVar:  "apps",
+				TargetType: "AppsModel",
+				Fields:     map[string]bool{"Resources.Entity.Name": true},
+				V3Endpoint: "/v3/apps",
+				V3Notes:    "test note",
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	result.WriteSummary(&buf)
+	out := buf.String()
+
+	for _, want := range []string{
+		"Found CliCommand calls",
+		"main.go:42",
+		"CliCommandWithoutTerminalOutput",
+		"/v3/apps",
+		"test note",
+		"AppsModel",
+		"Resources.Entity.Name",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("summary missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestNormalizeEndpoint(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"v2/apps", "v2/apps"},
+		{"/v2/apps", "v2/apps"},
+		{"/v2/apps?q=name:foo", "v2/apps"},
+		{"v2/apps/some-guid/stats", "v2/apps"},
+		{"/v2/service_instances", "v2/service_instances"},
+	}
+	for _, tt := range tests {
+		got := normalizeEndpoint(tt.input)
+		if got != tt.want {
+			t.Errorf("normalizeEndpoint(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestCurlStringsJoinPattern(t *testing.T) {
+	source := `package foo
+
+import (
+	"encoding/json"
+	"strings"
+)
+
+func example(conn CLI) {
+	output, _ := conn.CliCommandWithoutTerminalOutput("curl", "v2/stacks")
+	var stacks struct{ Name string }
+	json.Unmarshal([]byte(strings.Join(output, "")), &stacks)
+	_ = stacks.Name
+}
+`
+	result := scanSource(t, source)
+
+	if len(result.CliCommandCalls) != 1 {
+		t.Fatalf("expected 1 curl call, got %d", len(result.CliCommandCalls))
+	}
+	cc := result.CliCommandCalls[0]
+	if cc.TargetVar != "stacks" {
+		t.Errorf("expected target var stacks, got %q", cc.TargetVar)
+	}
+	if !cc.Fields["Name"] {
+		t.Error("expected Name field")
+	}
+}
+
+func TestCurlMixedWithV2Methods(t *testing.T) {
+	source := `package foo
+
+import "encoding/json"
+
+func example(conn CLI) {
+	app, _ := conn.GetApp("myapp")
+	_ = app.Guid
+
+	output, _ := conn.CliCommandWithoutTerminalOutput("curl", "v2/service_instances")
+	var svc struct{ Name string }
+	json.Unmarshal([]byte(output[0]), &svc)
+	_ = svc.Name
+}
+`
+	result := scanSource(t, source)
+
+	if _, ok := result.Methods["GetApp"]; !ok {
+		t.Error("expected GetApp V2 method to be detected")
+	}
+	if len(result.CliCommandCalls) != 1 {
+		t.Fatalf("expected 1 curl call, got %d", len(result.CliCommandCalls))
+	}
+	if result.CliCommandCalls[0].Endpoint != "v2/service_instances" {
+		t.Errorf("expected v2/service_instances, got %q", result.CliCommandCalls[0].Endpoint)
+	}
+}
+
 func TestWriteSummaryWriteError(t *testing.T) {
 	var captured error
 	orig := onWriteErr

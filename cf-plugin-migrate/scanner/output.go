@@ -12,7 +12,7 @@ import (
 
 // WriteYAML writes the scan result as a cf-plugin-migrate.yml file.
 func (r *ScanResult) WriteYAML(w io.Writer) error {
-	if len(r.Methods) == 0 {
+	if len(r.Methods) == 0 && len(r.CliCommandCalls) == 0 {
 		checkWriteErr(fmt.Fprintln(w, "# No V2 domain method calls found."))
 		return nil
 	}
@@ -80,6 +80,58 @@ func (r *ScanResult) WriteYAML(w io.Writer) error {
 		addPerItemComment(method, mr, methodNode)
 	}
 
+	// cli_commands section — all CliCommand/CliCommandWithoutTerminalOutput calls
+	if len(r.CliCommandCalls) > 0 {
+		root.Content = append(root.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "cli_commands"},
+		)
+
+		cmdSeq := &yaml.Node{Kind: yaml.SequenceNode}
+		root.Content = append(root.Content, cmdSeq)
+
+		for _, cc := range r.CliCommandCalls {
+			entry := &yaml.Node{Kind: yaml.MappingNode}
+			cmdSeq.Content = append(cmdSeq.Content, entry)
+
+			addScalar(entry, "file", cc.File)
+			addScalar(entry, "line", fmt.Sprintf("%d", cc.Line))
+			addScalar(entry, "method", cc.Method)
+			addScalar(entry, "command", cc.Command)
+
+			if len(cc.Args) > 0 {
+				entry.Content = append(entry.Content,
+					&yaml.Node{Kind: yaml.ScalarNode, Value: "args"},
+					buildFlowSequence(cc.Args),
+				)
+			}
+
+			// Curl-specific fields
+			if cc.Command == "curl" {
+				if cc.Endpoint != "" {
+					addScalar(entry, "endpoint", cc.Endpoint)
+				}
+				if cc.EndpointVar != "" {
+					addScalar(entry, "endpoint_var", cc.EndpointVar)
+				}
+				if cc.V3Endpoint != "" {
+					addScalar(entry, "v3_endpoint", cc.V3Endpoint)
+				}
+				if cc.V3Notes != "" {
+					addScalar(entry, "v3_notes", cc.V3Notes)
+				}
+				if cc.TargetType != "" {
+					addScalar(entry, "target_type", cc.TargetType)
+				}
+				if len(cc.Fields) > 0 {
+					entry.Content = append(entry.Content,
+						&yaml.Node{Kind: yaml.ScalarNode, Value: "fields"},
+						buildFlowSequence(sortedKeys(cc.Fields)),
+					)
+				}
+			}
+		}
+	}
+
 	enc := yaml.NewEncoder(w)
 	enc.SetIndent(2)
 	if err := enc.Encode(doc); err != nil {
@@ -90,12 +142,14 @@ func (r *ScanResult) WriteYAML(w io.Writer) error {
 
 // WriteSummary writes a human-readable summary of the scan to w.
 func (r *ScanResult) WriteSummary(w io.Writer) {
-	if len(r.Methods) == 0 {
+	if len(r.Methods) == 0 && len(r.CliCommandCalls) == 0 {
 		checkWriteErr(fmt.Fprintln(w, "No V2 domain method calls found."))
 		return
 	}
 
-	checkWriteErr(fmt.Fprintln(w, "Found V2 domain method calls:"))
+	if len(r.Methods) > 0 {
+		checkWriteErr(fmt.Fprintln(w, "Found V2 domain method calls:"))
+	}
 	checkWriteErr(fmt.Fprintln(w))
 
 	methodOrder := []string{
@@ -139,6 +193,48 @@ func (r *ScanResult) WriteSummary(w io.Writer) {
 			}
 		}
 		checkWriteErr(fmt.Fprintln(w))
+	}
+
+	// CliCommand/CliCommandWithoutTerminalOutput calls
+	if len(r.CliCommandCalls) > 0 {
+		checkWriteErr(fmt.Fprintln(w, "Found CliCommand calls (legacy — not available in V3 plugin interface):"))
+		checkWriteErr(fmt.Fprintln(w))
+
+		for _, cc := range r.CliCommandCalls {
+			// Build the argument display
+			argParts := []string{fmt.Sprintf("%q", cc.Command)}
+			for _, a := range cc.Args {
+				argParts = append(argParts, fmt.Sprintf("%q", a))
+			}
+
+			checkWriteErr(fmt.Fprintf(w, "  %s:%d\t%s(%s)\n",
+				cc.File, cc.Line, cc.Method, strings.Join(argParts, ", ")))
+
+			// Curl-specific details
+			if cc.Command == "curl" {
+				if cc.V3Endpoint != "" {
+					note := ""
+					if cc.V3Notes != "" {
+						note = " (" + cc.V3Notes + ")"
+					}
+					checkWriteErr(fmt.Fprintf(w, "    → V3 equivalent: %s%s\n", cc.V3Endpoint, note))
+				}
+
+				if cc.TargetVar != "" {
+					typePart := ""
+					if cc.TargetType != "" {
+						typePart = " (" + cc.TargetType + ")"
+					}
+					checkWriteErr(fmt.Fprintf(w, "    → Unmarshalled into: %s%s\n", cc.TargetVar, typePart))
+				}
+
+				if len(cc.Fields) > 0 {
+					fields := sortedKeys(cc.Fields)
+					checkWriteErr(fmt.Fprintf(w, "    → Fields used: %s\n", strings.Join(fields, ", ")))
+				}
+			}
+			checkWriteErr(fmt.Fprintln(w))
+		}
 	}
 }
 

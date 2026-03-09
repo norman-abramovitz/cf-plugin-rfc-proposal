@@ -67,7 +67,7 @@
   - [x] Phase C: Simple domain methods (GetOrgs, GetSpaces)
   - [x] Phase D: Medium domain methods (GetService, GetServices, GetOrg, GetSpace, GetOrgUsers, GetSpaceUsers)
   - [x] Phase E: Complex domain methods (GetApps, GetApp — dependency chains, per-item calls) — tested with OCF Scheduler against live CAPI V3 (v3.180.0): `cf create-job` resolved app via V3 `Applications.Single`
-  - [ ] Phase F: Scanner enhancement — `CliCommand`/`cf curl` analysis (endpoint URL extraction, JSON unmarshal tracing, V2→V3 endpoint mapping)
+  - [x] Phase F: Scanner enhancement — detect all `CliCommand`/`CliCommandWithoutTerminalOutput` calls (command + args extraction), `cf curl` deep analysis (endpoint URL extraction, JSON unmarshal tracing, field access, V2→V3 endpoint mapping for 20 known endpoints). Validated against test_rpc_server_example, mysql-cli-plugin (14 calls), ocf-scheduler (0 calls).
   - [ ] Phase G: Polish — golden file tests, CLI flags, error messages
 - [ ] Document token lifecycle pattern (`config.TokenProvider()` for long-running plugins)
 - [ ] Proof-of-concept: Analyze and walk through list-services migration (Tier 1: simple)
