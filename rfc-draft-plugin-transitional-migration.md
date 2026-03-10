@@ -53,6 +53,41 @@ Many plugins use `CliCommand` or `CliCommandWithoutTerminalOutput` to run arbitr
 
 A scan of 18 actively maintained plugins found `CliCommand` usage across 14 plugins, with patterns ranging from simple `cf apps` to complex `cf curl` with JSON parsing and pagination.
 
+### Plugins Import CLI Internal Packages
+
+Beyond the intended public interface (`plugin/` and `plugin/models/`), 8 of 18 surveyed plugins import internal CLI packages — creating a build-time dependency on code the CLI team never intended to expose.
+
+An audit of all 18 plugins (performed against upstream default branches, not local work branches) found two dominant coupling patterns:
+
+| Internal Package | Plugins | Purpose |
+|---|---|---|
+| `cf/terminal` | 6 | Colored/formatted terminal output |
+| `cf/trace` | 6 | HTTP request tracing/debug logging |
+| `cf/configuration/confighelpers` | 4 | Config file path discovery |
+| `cf/i18n` | 2 | Internationalization |
+| Other (`cf/formatters`, `cf/flags`, `util/configv3`, `util/ui`) | 1 each | Formatting, flag parsing, config access, UI rendering |
+
+**Coupled plugins:**
+
+| Plugin | Internal Packages | Severity |
+|---|---|---|
+| MultiApps / MTA | `cf/terminal`, `cf/formatters`, `cf/i18n`, `cf/trace` | High — 14+ production files |
+| mysql-cli-plugin | `cf/configuration/confighelpers`, `util/configv3`, `util/ui` | High — deepest internal coupling |
+| App Autoscaler | `cf/trace`, `cf/configuration/confighelpers` | Medium |
+| cf-targets-plugin | `cf/configuration`, `cf/configuration/confighelpers`, `cf/configuration/coreconfig` | Medium — config file read/write |
+| Swisscom appcloud | `cf/flags`, `cf/terminal`, `cf/trace` | Medium |
+| cf-java-plugin | `cf/terminal`, `cf/trace` | Low |
+| html5-apps-repo | `cf/terminal`, `cf/i18n` | Low |
+| list-services | `cf/terminal`, `cf/trace` | Low |
+
+**These packages are currently frozen — but that's luck, not design.** Analysis of the CF CLI git history shows zero exported API changes in `cf/configuration/confighelpers` since 2020, and only test infrastructure updates (ginkgo v2) in `cf/terminal`, `cf/trace`, `cf/formatters`, `cf/i18n`, and `cf/flags`. The coupling hasn't broken plugins *yet* because the CLI team hasn't refactored these packages. Any future refactoring of `cf/terminal` or `cf/configuration` would break 8 plugins with no warning.
+
+The one exception is `util/configv3` (mysql-cli-plugin only), which has 24 commits since 2020 including structural changes for Kubernetes support — this coupling has already diverged and would not compile against CLI HEAD.
+
+The module path migration from `code.cloudfoundry.org/cli` to `code.cloudfoundry.org/cli/v8` is an additional breaking change for plugins still pinned to `v7.1.0+incompatible`.
+
+**Why this matters for the transitional migration:** The V2Compat wrapper approach addresses the *intended* coupling (imports of `plugin/` and `plugin/models/`). But plugins with internal package imports have a second, harder coupling problem that the wrapper cannot solve — they must replace those imports with standalone alternatives (e.g., standard library `log` instead of `cf/trace`, `text/tabwriter` or third-party packages instead of `cf/terminal`).
+
 ### Who Should Migrate
 
 - Plugin developers whose plugins call V2 domain methods (`GetApp`, `GetApps`, `GetService`, `GetServices`, `GetOrg`, `GetOrgs`, `GetSpaces`, `GetOrgUsers`, `GetSpaceUsers`)
@@ -1021,7 +1056,22 @@ Most actively maintained CF foundations run CAPI 3.100+ (CF Deployment 25+), so 
 
 #### Token Lifecycle
 
-`AccessToken()` returns a *snapshot* token — go-cfclient does not get a refresh token. For long-running plugins, use `config.TokenProvider()`:
+`AccessToken()` returns a *snapshot* — the token value at the moment the RPC call is made. The host manages token refresh internally (via `config.ConfigRepository`), but go-cfclient does not receive a refresh token. This creates two patterns depending on plugin lifetime:
+
+**Short-lived plugins** (most plugins — run a command and exit):
+
+Use `config.Token()` directly. The token returned by `AccessToken()` at startup is valid for the plugin's entire lifetime (CF tokens typically last 10–20 minutes; most plugin commands complete in seconds).
+
+```go
+cfg, _ := config.New(endpoint,
+    config.Token(token),           // snapshot token — valid for short operations
+    config.SkipTLSValidation(skipSSL),
+)
+```
+
+**Long-running plugins** (polling loops, watch commands, streaming):
+
+Use `config.TokenProvider()` to re-fetch from the host's RPC on each API call. The host refreshes the token transparently via its own OAuth2 flow, so each call to `AccessToken()` returns a current token.
 
 ```go
 cfg, _ := config.New(endpoint,
@@ -1032,7 +1082,11 @@ cfg, _ := config.New(endpoint,
 )
 ```
 
-This re-fetches from the host's RPC each time the client needs a token, preventing expiry issues.
+**When `TokenProvider` is necessary:** If a plugin makes API calls over a span longer than the token's TTL (typically 10–20 minutes), a snapshot token will expire mid-operation. Symptoms: go-cfclient returns 401 errors after the plugin has been running for several minutes. The fix is switching from `config.Token()` to `config.TokenProvider()`.
+
+**Edge case:** If the host (CF CLI) exits while the plugin is still running, `conn.AccessToken()` will return an RPC error. Long-running plugins SHOULD handle this gracefully — see Error Handling at the Boundary.
+
+The generated V2Compat wrapper uses `config.Token()` by default (appropriate for the common case). Plugins that need long-running behavior SHOULD switch to `config.TokenProvider()` manually — the generator does not make this choice automatically because it cannot determine plugin lifetime from static analysis.
 
 ### UAA and CredHub
 
