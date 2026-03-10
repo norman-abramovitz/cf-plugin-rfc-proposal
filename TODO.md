@@ -100,9 +100,58 @@
 
 ## Plugin Host-Code Coupling Analysis
 
-- [ ] Audit all 18 surveyed plugins for direct imports of CF CLI host-side packages (`code.cloudfoundry.org/cli/...` beyond `plugin` and `plugin/models`). Any import of CLI internals creates tight coupling that breaks if the CLI refactors or removes those packages.
-  - [x] cf-targets-plugin — imports `cli/cf/configuration`, `cli/cf/configuration/confighelpers`, `cli/cf/configuration/coreconfig` to read/write CLI config files directly. Bypasses plugin interface entirely.
-  - [ ] Remaining 17 plugins — need analysis
+- [x] Audit all 18 surveyed plugins for direct imports of CF CLI host-side packages (`code.cloudfoundry.org/cli/...` beyond `plugin` and `plugin/models`). All audits performed against upstream/pre-V3 branches — not local work branches.
+
+  **Result: 10 clean, 8 coupled.**
+
+  Coupled plugins (production imports beyond `plugin`/`plugin/models`):
+  - [x] cf-targets-plugin — `cf/configuration`, `cf/configuration/confighelpers`, `cf/configuration/coreconfig` (config file read/write)
+  - [x] App Autoscaler — `cf/trace`, `cf/configuration/confighelpers` (tracing + config path)
+  - [x] cf-app-autoscaler (v8 fork) — `cli/v8/cf/trace`, `cli/v8/cf/configuration/confighelpers` (same pattern, v8 import paths)
+  - [x] MultiApps / MTA — `cli/v8/cf/terminal`, `cli/v8/cf/formatters`, `cli/v8/cf/i18n`, `cli/v8/cf/trace` (14+ production files — heaviest coupling)
+  - [x] mysql-cli-plugin — `cf/configuration/confighelpers`, `util/configv3`, `util/ui` (deepest internal coupling)
+  - [x] cf-java-plugin — `cf/terminal`, `cf/trace` (UI + tracing)
+  - [x] Swisscom appcloud — `cf/flags`, `cf/terminal`, `cf/trace` (flags + UI + tracing)
+  - [x] html5-apps-repo — `cf/terminal`, `cf/i18n` (UI + i18n; still uses old `github.com/cloudfoundry/cli` import path)
+  - [x] list-services — `cf/terminal`, `cf/trace` (UI + tracing; pre-modules, no go.mod)
+
+  Clean plugins (only import `plugin` and/or `plugin/models`):
+  - [x] OCF Scheduler, Rabobank cf-plugins, upgrade-all-services, stack-auditor, log-cache-cli, DefaultEnv, metric-registrar, service-instance-logs, spring-cloud-services, cf-lookup-route
+
+  **Coupling patterns by prevalence:**
+
+  | Internal Package | Plugins | Purpose |
+  |---|---|---|
+  | `cf/terminal` | 6 | Colored/formatted output |
+  | `cf/trace` | 6 | HTTP request tracing |
+  | `cf/configuration/confighelpers` | 4 | Config file path discovery |
+  | `cf/i18n` | 2 | Internationalization |
+  | `cf/formatters` | 1 | Byte/size formatting |
+  | `cf/flags` | 1 | Flag parsing |
+  | `cf/configuration` + `coreconfig` | 1 | Direct config file read/write |
+  | `util/configv3` | 1 | V3 config layer |
+  | `util/ui` | 1 | UI rendering |
+
+- [x] Analyze whether coupled internal packages have changed since plugins pinned their CLI dependency.
+
+  **Result: The `cf/` packages are effectively frozen.**
+
+  | Package | Commits Since 2020 | Exported API Changes | Breaking? |
+  |---|---|---|---|
+  | `cf/configuration/confighelpers` | **0** | None | No |
+  | `cf/trace` | 4 | None (test infra only) | No |
+  | `cf/terminal` | 7 | None (test/cosmetic only) | No |
+  | `cf/formatters` | 1 | None (test only) | No |
+  | `cf/i18n` | 2 | None (test/internal) | No |
+  | `cf/flags` | 4 | None (test/cosmetic) | No |
+  | `cf/configuration/coreconfig` | 7 | Additive (new fields, semver v4 dep) | Potentially |
+  | `util/configv3` | **24** | Structural (K8s support, new embedded interface) | **Yes** |
+  | `util/ui` | 19 | Additive (new methods only) | No |
+
+  **Key insight:** The coupling hasn't broken plugins *yet* because the CLI team hasn't touched these packages. But this is luck, not design — any refactoring of `cf/terminal` or `cf/configuration` would break 8 plugins with no warning. The `util/configv3` package (mysql-cli-plugin only) has already diverged structurally.
+
+  **Module path migration** from `code.cloudfoundry.org/cli` to `code.cloudfoundry.org/cli/v8` is an additional breaking change for plugins pinned to `v7.1.0+incompatible` (mysql, list-services, html5-apps-repo).
+
 - [ ] Create GitHub issues for plugins with host-code coupling
 - [ ] Create Jira tickets for tracking host-code coupling remediation
 - [ ] Document coupling patterns in the transitional migration RFC (audience: managers/reviewers need to understand the blast radius of CLI internal changes)
