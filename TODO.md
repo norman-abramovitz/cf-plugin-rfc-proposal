@@ -73,6 +73,8 @@
     - [x] Golden file tests: 4 fixtures (session_only_plugin, getapp_guid_only_plugin, ocf_scheduler_plugin, metric_registrar_plugin) with -update flag for regeneration
     - [x] CLI flags: Added `-h`/`--help`/`help` support for all subcommands, `-o` output flag for generate, proper `flag.FlagSet` parsing, usage examples
     - [x] Error messages: Config-not-found suggests running scan, unknown command shows usage
+  - [ ] Phase H: Scanner — detect CLI internal package imports (`code.cloudfoundry.org/cli/...` beyond `plugin` and `plugin/models`). Report in human-readable summary and in YAML as `internal_imports` section. This should ship even without replacement suggestions — detection alone is valuable for migration planning.
+  - [ ] Phase H+: Add validated replacement suggestions to the scanner output for each detected internal import. Requires research (see below) to ensure suggestions are correct before presenting them to developers.
 - [x] Document token lifecycle pattern (`config.TokenProvider()` for long-running plugins) — see [transitional RFC token lifecycle](rfc-draft-plugin-transitional-migration.md#token-lifecycle)
 - [x] Proof-of-concept: Analyze and walk through list-services migration (Tier 1: simple) — see [transitional RFC worked example](rfc-draft-plugin-transitional-migration.md#list-services-tier-1-simplest-domain-method-migration). Key finding: plugin is already 90% V3; demonstrates all three coupling patterns (V2 domain method, cf curl, CLI internal imports) in simplest form.
 - [x] Proof-of-concept: Analyze and walk through OCF Scheduler migration (Tier 2: moderate) — see [transitional RFC worked example](rfc-draft-plugin-transitional-migration.md#worked-example-ocf-scheduler-plugin)
@@ -159,6 +161,19 @@
 - [ ] Create GitHub issues for plugins with host-code coupling
 - [ ] Create Jira tickets for tracking host-code coupling remediation
 - [x] Document coupling patterns in the transitional migration RFC (audience: managers/reviewers need to understand the blast radius of CLI internal changes) — see [transitional RFC "Plugins Import CLI Internal Packages"](rfc-draft-plugin-transitional-migration.md#plugins-import-cli-internal-packages)
+- [ ] Validate replacement suggestions for each CLI internal package before adding to scanner. Analysis so far:
+
+  | Internal Package | What plugins use it for | Candidate replacement | Open questions |
+  |---|---|---|---|
+  | `cf/terminal` | Table formatting, colored output (`ui.Failed()`, `ui.Say()`, `ui.Table()`) | `text/tabwriter` for tables; `fatih/color` or `charmbracelet/lipgloss` for color | `text/tabwriter` handles alignment but not color. Plugins using colored error/success output would lose that with tabwriter alone. Need to assess which plugins actually use color vs. just tables. |
+  | `cf/trace` | HTTP request/response debug logging, controlled by `CF_TRACE` env var | `log` package | `log` doesn't replicate `CF_TRACE` env var behavior. Users expect `CF_TRACE=true` to show HTTP traffic from plugins. A proper replacement needs to check that env var and conditionally log HTTP round-trips. |
+  | `cf/configuration/confighelpers` | `DefaultFilePath()` — finds `~/.cf/config.json` | `os.UserConfigDir()` + `filepath.Join(".cf")` | `os.UserConfigDir()` returns `~/.config` on Linux, not `~/.cf`. The actual path logic in `confighelpers` handles `$CF_HOME` env var override. Suggestion is incomplete without `CF_HOME` handling. |
+  | `cf/configuration` + `coreconfig` | Read/write `~/.cf/config.json` directly (cf-targets-plugin only) | Direct JSON parsing of config file | The config file format is undocumented. Parsing it directly makes the plugin depend on an undocumented file format instead of an undocumented Go API — arguably same risk, different form. |
+  | `cf/i18n` | Internationalized strings | `golang.org/x/text` or inline strings | `cf/i18n` has CLI-specific translation catalogs. Plugins would need to decide whether to carry their own translations or drop i18n support. |
+  | `cf/flags` | CLI flag parsing | `flag` (stdlib) or `pflag` | Straightforward swap. `cf/flags` has some custom behavior but standard `flag` covers most cases. |
+  | `cf/formatters` | `ByteSize()` — human-readable byte formatting | `fmt.Sprintf` with custom formatting, or `dustin/go-humanize` | Simple enough to inline. Low risk. |
+  | `util/configv3` | Full CLI config access (target, auth, K8s) — mysql-cli-plugin only | Direct config file access | Hardest replacement. `configv3` is a complex internal config layer with K8s support, user config interface, and environment variable handling. "Direct config file access" is hand-waving. Needs deep analysis of what mysql-cli-plugin actually reads from it. |
+  | `util/ui` | Structured output, diff display — mysql-cli-plugin only | `text/tabwriter` or `fmt` | Depends on how much of the `ui` API the plugin uses. `util/ui` has methods like `DisplayDiffAddition`, `DisplayTextLiteral` that go beyond simple table printing. |
 
 ## Future RFCs (Out of Scope)
 
