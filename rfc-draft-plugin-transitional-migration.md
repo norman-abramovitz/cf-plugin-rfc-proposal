@@ -466,6 +466,115 @@ The cf-targets-plugin uses only context methods (`GetCurrentOrg`, `GetCurrentSpa
 
 **Migration:** Run `cf-plugin-migrate scan` → generates a session-only V2Compat with pure pass-through methods. Drop in the file, build, install. **Zero lines of plugin code changed.**
 
+##### list-services (Tier 1: Simplest Domain Method Migration)
+
+The [list-services plugin](https://github.com/pavellom/list-services-plugin) lists services bound to a specific app. It is **already 90% V3** — it uses `GetApp(name)` solely to resolve an app name to a GUID, then immediately calls CAPI V3 via `cf curl /v3/service_bindings?app_guids={guid}` to fetch the actual data.
+
+**Current usage:**
+
+| Interface | Call | Fields/Details |
+|---|---|---|
+| V2 domain method | `GetApp(appName)` | `.Guid` only — name-to-GUID resolution |
+| `CliCommandWithoutTerminalOutput` | `curl /v3/service_bindings?app_guids={guid}` | V3 endpoint — paginated, JSON parsed manually |
+| `CliCommand` | `help list-services` | Help text display (plugin's own command) |
+| Context methods | `IsLoggedIn()`, `HasOrganization()`, `HasSpace()` | Login/target guards |
+| CLI internal imports | `cf/terminal`, `cf/trace` | Table formatting and tracing |
+
+**Scan output:**
+
+```yaml
+schema_version: 1
+package: main
+methods:
+  GetApp:
+    fields: [Guid]
+cli_commands:
+  - file: listservices.go
+    method: CliCommandWithoutTerminalOutput
+    command: curl
+    endpoint: /v3/service_bindings
+    v3_endpoint: /v3/service_credential_bindings  # renamed in newer CAPI
+```
+
+**Migration — three independent improvements:**
+
+**1. Replace `GetApp` (V2 domain method → V3):**
+
+```go
+// Before:
+app, err := cliConnection.GetApp(appName)
+// uses app.Guid
+
+// After (generated wrapper):
+cliConnection, err := NewV2Compat(cliConnection)
+// app.Guid now resolved via V3 Applications.Single()
+
+// After (direct V3 — recommended for this plugin):
+apps, err := cfClient.Applications.ListAll(ctx,
+    &client.AppListOptions{
+        Names:      client.Filter{Values: []string{appName}},
+        SpaceGUIDs: client.Filter{Values: []string{spaceGUID}},
+    })
+appGUID := apps[0].GUID
+```
+
+Since the plugin uses only `.Guid`, either approach works. The direct V3 call is simpler here because the plugin already does its own HTTP calls for everything else.
+
+**2. Replace `cf curl` with go-cfclient (optional but recommended):**
+
+```go
+// Before:
+output, _ := cliConnection.CliCommandWithoutTerminalOutput("curl",
+    fmt.Sprintf("/v3/service_bindings?app_guids=%s", app.Guid))
+// Manual JSON parsing, manual pagination loop
+
+// After:
+bindings, err := cfClient.ServiceCredentialBindings.ListAll(ctx,
+    &client.ServiceCredentialBindingListOptions{
+        AppGUIDs: client.Filter{Values: []string{appGUID}},
+        Include:  client.ServiceCredentialBindingIncludeServiceInstance,
+    })
+for _, b := range bindings {
+    // b.Relationships.ServiceInstance gives the instance GUID
+    // Included service instance gives the name
+}
+```
+
+This eliminates the manual `Response`/`Pagination`/`Resource` structs, the pagination loop, and the JSON parsing. go-cfclient handles all of it.
+
+**3. Replace `cf/terminal` import (host-code coupling):**
+
+```go
+// Before (terminal/terminal.go):
+import "code.cloudfoundry.org/cli/cf/terminal"
+ui := terminal.NewUI(os.Stdin, os.Stdout, terminal.NewTeePrinter(os.Stdout), trace.NewWriterPrinter(os.Stdout, false))
+table := ui.Table([]string{"Service Name", "Service URL"})
+table.Add(name, url)
+table.Print()
+
+// After (standard library):
+w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+fmt.Fprintln(w, "Service Name\tService URL")
+for _, b := range bindings {
+    fmt.Fprintf(w, "%s\t%s\n", b.Name, b.URL)
+}
+w.Flush()
+```
+
+This removes the `cf/terminal` and `cf/trace` coupling entirely, replacing it with Go's standard library `text/tabwriter`.
+
+**Result:**
+
+| Metric | Before | After |
+|---|---|---|
+| V2 domain methods | 1 (`GetApp`) | **0** |
+| `cf curl` calls | 2 (V3 endpoint + pagination) | **0** (go-cfclient handles pagination) |
+| CLI internal imports | 2 (`cf/terminal`, `cf/trace`) | **0** (standard library) |
+| Manual JSON structs | 5 (`Response`, `Pagination`, `Resource`, `Data`, `Links`) | **0** |
+| New dependencies | — | go-cfclient/v3 |
+
+**Why this is the ideal Tier 1 example:** The plugin demonstrates all three coupling patterns found across the plugin ecosystem — V2 domain methods, `cf curl` calls, and CLI internal package imports — but each in its simplest form. The migration is straightforward because the plugin already uses V3 for its core data access; it just needs the last V2 dependency (`GetApp` for GUID resolution) replaced and the CLI internal imports removed.
+
 ##### OCF Scheduler (Domain Methods: One Dependency + One Line)
 
 The [OCF Scheduler plugin](https://github.com/cloudfoundry-community/ocf-scheduler-cf-plugin) uses `GetApp` (for `.Guid` only) and `GetApps` (for `.Guid`, `.Name`). No other fields are accessed — not `State`, `Routes`, `Memory`, `Instances`, or any other model attribute. The plugin uses V2 model methods purely as a name/GUID mapping layer.
@@ -1165,8 +1274,9 @@ To validate the transitional approach, three plugins from the [plugin survey](pl
 
 - **V2 methods used:** `GetApp()` — for GUID resolution only
 - **Fields consumed:** `Guid` only (1 field → 1 V3 API call)
-- **Migration:** Replace `conn.GetApp(name)` with `cfClient.Applications.Single(ctx, opts)`, read `.GUID` — or generate a wrapper that returns `GetAppModel{Guid: app.GUID}`
-- **Why:** Simplest possible case. Validates the end-to-end flow with minimal risk.
+- **Additional patterns:** `cf curl` against V3 endpoint (already V3!), CLI internal imports (`cf/terminal`, `cf/trace`)
+- **Migration:** Replace one `GetApp` call, switch `cf curl` to go-cfclient, replace `cf/terminal` with `text/tabwriter`
+- **Why:** Demonstrates all three coupling patterns (V2 domain, cf curl, internal imports) in their simplest form. Already 90% V3. See [worked example above](#list-services-tier-1-simplest-domain-method-migration).
 
 #### Tier 2: Moderate — OCF Scheduler
 

@@ -43,6 +43,7 @@
 - [ ] Add error handling and edge case guidance (expired tokens, no target, plugin crashes mid-stream)
 - [ ] Decide: How to pass connection info to new-protocol plugins (env vars `CF_PLUGIN_PORT`, `CF_PLUGIN_PROTOCOL` vs. other mechanism)
 - [ ] Decide: Does the message serialization format need to be fixed to JSON? The channel abstraction could support alternative serialization formats (e.g., MessagePack, CBOR, Protobuf) alongside JSON-RPC — the `CF_PLUGIN_METADATA:` marker could declare the preferred format.
+- [ ] Decide: Should the Plugin SDK include interfaces/functions to cover the non-plugin CLI internal packages that 8 plugins import (`cf/terminal`, `cf/trace`, `cf/configuration/confighelpers`, `cf/i18n`, `cf/flags`, `util/configv3`, `util/ui`)? If so, which RFC covers this — the transitional migration RFC or the main V3 plugin interface RFC? These are not part of the plugin contract but are de facto dependencies for nearly half the plugin ecosystem.
 - [x] Discuss Rabobank transitional wrapper caveats → V2-to-V3 data shape differences (IsAdmin, single process, single buildpack, missing stats) resolved by generated wrapper approach. Implementation bugs (token prefix, SSL, user agent) documented. See [transitional RFC](rfc-draft-plugin-transitional-migration.md#lessons-from-the-rabobank-implementation).
 
 ### Stakeholder Review
@@ -70,7 +71,7 @@
   - [x] Phase F: Scanner enhancement — detect all `CliCommand`/`CliCommandWithoutTerminalOutput` calls (command + args extraction), `cf curl` deep analysis (endpoint URL extraction, JSON unmarshal tracing, field access, V2→V3 endpoint mapping for 20 known endpoints). Validated against test_rpc_server_example, mysql-cli-plugin (14 calls), ocf-scheduler (0 calls).
   - [ ] Phase G: Polish — golden file tests, CLI flags, error messages
 - [x] Document token lifecycle pattern (`config.TokenProvider()` for long-running plugins) — see [transitional RFC token lifecycle](rfc-draft-plugin-transitional-migration.md#token-lifecycle)
-- [ ] Proof-of-concept: Analyze and walk through list-services migration (Tier 1: simple)
+- [x] Proof-of-concept: Analyze and walk through list-services migration (Tier 1: simple) — see [transitional RFC worked example](rfc-draft-plugin-transitional-migration.md#list-services-tier-1-simplest-domain-method-migration). Key finding: plugin is already 90% V3; demonstrates all three coupling patterns (V2 domain method, cf curl, CLI internal imports) in simplest form.
 - [x] Proof-of-concept: Analyze and walk through OCF Scheduler migration (Tier 2: moderate) — see [transitional RFC worked example](rfc-draft-plugin-transitional-migration.md#worked-example-ocf-scheduler-plugin)
 - [x] Proof-of-concept: Analyze and walk through metric-registrar migration (Tier 3: complex) — see [transitional RFC worked example](rfc-draft-plugin-transitional-migration.md#worked-example-metric-registrar-plugin-complex-migration)
 - [x] Analyze Rabobank consumer plugins to verify whether full V2 reimplementation was necessary — see [transitional RFC consumer analysis](rfc-draft-plugin-transitional-migration.md#consumer-plugin-analysis-was-the-full-reimplementation-necessary)
