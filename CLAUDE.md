@@ -57,15 +57,27 @@ These items in TODO.md under "Decisions Still Needed" are unresolved. When worki
 - Code examples use Go for the core contract and interface definitions. Python/Perl examples appear where polyglot support is relevant.
 - Tables are used extensively for cross-plugin comparisons and format summaries.
 
+### Document Audience Awareness
+- The **Problem** section is read by all audiences (managers, TOC, CLI team, plugin developers). Keep it focused on quantifying risk and blast radius — tables, counts, severity assessments. No implementation-level detail (Go function signatures, module layouts, code examples, line counts).
+- The **Proposal** section targets implementers (plugin developers, CLI team). Put package designs, function signatures, code examples, and migration instructions here.
+- The **Summary** section is the executive overview — concise enough for managers and reviewers to assess scope and risk without reading the full document.
+- Cross-link between sections rather than duplicating or misplacing content. Use anchor links (`[text](#heading-slug)`) so readers can navigate from high-level to detail.
+- When adding new content, ask: "Who needs to read this?" and place it in the section that audience reads first.
+
 ### Cross-Document Consistency
 - When updating the RFC, check whether `cli-plugin-interface-todo.md`, `plugin-survey.md`, and `TODO.md` need corresponding updates.
 - Decisions should be recorded in TODO.md under "Decisions Made" with a reference to the RFC section.
 - New research findings should be added to TODO.md under "Research & Analysis (Completed)" when done.
 
 ### Writing Style
-- Technical and precise. Avoid marketing language.
+- Detail increases by audience level, from minimal technical background to very technical:
+  - **Summary** — accessible to managers, reviewers, and TOC members with minimal technical background. Marketing-style language is appropriate here to communicate value and urgency.
+  - **Problem** — technical enough to quantify risk and scope for engineering managers and team leads. Tables, counts, severity assessments — not code.
+  - **Proposal** — very technical, targeting plugin developers and CLI team engineers. Code examples, function signatures, implementation detail.
+- **Define terms before use.** Never reference a term (e.g., "V2 domain methods", "Host", "Guest") before it has been defined. The glossary must precede any prose that uses its terms.
 - Use RFC 2119 keywords (MUST, SHOULD, MAY) in the RFC document per convention.
 - When referencing the current CLI codebase, use full file paths relative to the CLI repo root (e.g., `plugin/rpc/cli_rpc_server.go`).
+- **Always include rationale.** Every architectural decision, design choice, or recommendation MUST include the reasoning behind it — the "why", not just the "what". Record rationale in both the RFC document (inline with the decision) and in TODO.md (under "Decisions Made"). A decision without rationale is incomplete.
 
 ## Related Repositories
 

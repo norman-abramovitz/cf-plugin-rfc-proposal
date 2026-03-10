@@ -11,21 +11,20 @@
 **Key terms used throughout this document:**
 - **Host** — the CF CLI process that launches and manages plugins
 - **Guest** — the plugin process launched by the host
-- **V2 domain methods** — the 10 methods on `plugin.CliConnection` that return V2-shaped data (`GetApp`, `GetApps`, `GetService`, `GetServices`, `GetOrg`, `GetOrgs`, `GetSpace`, `GetSpaces`, `GetOrgUsers`, `GetSpaceUsers`)
-- **Context methods** — the 11 methods on `plugin.CliConnection` that return session and authentication data (`AccessToken`, `ApiEndpoint`, `GetCurrentOrg`, `GetCurrentSpace`, `Username`, `IsLoggedIn`, `HasOrganization`, `HasSpace`, `IsSSLDisabled`, `HasAPIEndpoint`, `ApiVersion`)
-- **CAPI V3** — Cloud Controller API version 3, the CF platform's REST API
-- **go-cfclient** — the official Go client library for CAPI V3 (`github.com/cloudfoundry/go-cfclient/v3`)
-- **`plugin.CliConnection`** — the Go interface that the host provides to guests, carrying both V2 domain methods and context methods
+- **CAPI** — Cloud Controller API, the CF platform's REST API. CAPI V2 is reaching end of life; CAPI V3 is the current version.
+- **V2 domain methods** — the 10 methods on the plugin interface that return CAPI V2-shaped data (e.g., `GetApp`, `GetApps`, `GetService` — [full list in Technical Reference](#v2-plugin-model-struct-reference))
+- **Context methods** — the 11 methods that return session and authentication data (e.g., `AccessToken`, `ApiEndpoint`, `GetCurrentOrg` — [full list in Technical Reference](#context-models-pass-through--no-wrappers-needed))
+- **go-cfclient** — the official Go client library for CAPI V3
 
-This document describes a **guest-side (plugin-side) transitional migration approach** that allows existing Go plugins to begin migrating from V2 domain methods to direct CAPI V3 access **today**, without waiting for any host changes.
+The CF CLI plugin interface depends on CAPI V2, which is reaching end of life. When V2 endpoints are removed, plugins that rely on the host's V2 domain methods will break — affecting at least 18 actively maintained plugins across the Cloud Foundry ecosystem.
 
-The approach has two key properties:
+This document proposes a **transitional migration** that plugin teams can adopt **today**, without waiting for CLI team changes or a new plugin interface. A companion tool (`cf-plugin-migrate`) scans a plugin's source code, identifies exactly what V2 functionality it uses, and generates drop-in replacement code backed by CAPI V3.
 
-1. **No host changes required.** A generated wrapper library sits entirely on the guest side, wraps the existing `plugin.CliConnection`, and provides a pre-configured go-cfclient V3 client. It works with any existing CF CLI version (v7, v8, v9).
+1. **Immediate risk reduction.** Plugins eliminate their V2 dependency before the deprecation deadline. Session-only plugins require zero code changes; plugins using V2 domain methods require one new dependency and minimal code changes.
 
-2. **Host-guest separation.** By moving domain operations to the guest side, the host CLI is freed to remove its V2 domain method implementation code (`GetApp`, `GetApps`, `GetService`, etc.) on its own timeline. The guest no longer depends on the host for V2 data — it fetches directly from CAPI V3. This clean separation benefits both sides: plugin developers migrate at their own pace, and CLI maintainers can simplify the host codebase without coordinating with every plugin author.
+2. **No cross-team coordination required.** The migration runs entirely on the guest side — it works with any existing CF CLI version (v7, v8, v9). Plugin teams migrate at their own pace without blocking on CLI releases.
 
-The migration is supported by **`cf-plugin-migrate`**, a companion tool that scans plugin source code, detects V2 usage, and generates minimal V3-backed wrapper functions. For session-only plugins (those that use only context methods like `AccessToken`, `GetCurrentOrg`, etc.), the migration requires **zero code changes** — just drop in the generated file. For plugins that call V2 domain methods, the migration requires **one new dependency** (go-cfclient/v3) and optionally **one line of code** changed.
+3. **Unblocks CLI simplification.** By moving data operations to the guest side, the CLI team is freed to remove legacy V2 support code on its own timeline — reducing maintenance burden and eliminating a class of RPC-related bugs.
 
 This approach is validated by the [Rabobank `cf-plugins`](https://github.com/rabobank/cf-plugins) library, which has been in production use since 2025 (see [plugin survey case study](plugin-survey.md#case-study-rabobank-guest-side-transitional-wrapper)).
 
@@ -57,7 +56,7 @@ A scan of 18 actively maintained plugins found `CliCommand` usage across 14 plug
 
 Beyond the intended public interface (`plugin/` and `plugin/models/`), 8 of 18 surveyed plugins import internal CLI packages — creating a build-time dependency on code the CLI team never intended to expose.
 
-An audit of all 18 plugins (performed against upstream default branches, not local work branches) found two dominant coupling patterns:
+An audit of all 18 plugins (performed against upstream default branches prior to any V3 migration work — noting that Rabobank's migration began in 2025) found two dominant coupling patterns:
 
 | Internal Package | Plugins | Purpose |
 |---|---|---|
@@ -86,7 +85,85 @@ The one exception is `util/configv3` (mysql-cli-plugin only), which has 24 commi
 
 The module path migration from `code.cloudfoundry.org/cli` to `code.cloudfoundry.org/cli/v8` is an additional breaking change for plugins still pinned to `v7.1.0+incompatible`.
 
-**Why this matters for the transitional migration:** The V2Compat wrapper approach addresses the *intended* coupling (imports of `plugin/` and `plugin/models/`). But plugins with internal package imports have a second, harder coupling problem that the wrapper cannot solve — they must replace those imports with standalone alternatives (e.g., standard library `log` instead of `cf/trace`, `text/tabwriter` or third-party packages instead of `cf/terminal`).
+**Why this matters for the transitional migration:** The V2Compat wrapper approach addresses the *intended* coupling (imports of `plugin/` and `plugin/models/`). But plugins with internal package imports have a second, harder coupling problem that the wrapper cannot solve — they must replace those imports with standalone alternatives.
+
+#### Function-Level Complexity Assessment
+
+A function-level audit of what each plugin actually calls reveals that **most coupling is shallow** — a handful of functions, not deep framework integrations. This makes replacement feasible for 7 of 9 packages with minimal effort.
+
+**cf/terminal — two distinct usage patterns:**
+
+| Pattern | Plugins | Functions Used | Replacement Effort |
+|---|---|---|---|
+| **Full UI framework** | multiapps-cli-plugin (16 files) | `terminal.UI` interface (`Say`, `Warn`, `Failed`, `Ok`, `Table`, `Ask`, `Confirm`), `NewUI`, `NewTeePrinter`, `EntityNameColor` (30+ calls), `CommandColor`, `FailureColor`, `InitColorSupport`, `UITable` | Medium-Large — but self-contained to one plugin |
+| **UI bootstrap only** | ocf-scheduler, cf-java-plugin, Swisscom appcloud, html5-apps-repo, list-services | `NewUI`, `NewTeePrinter`, `UserAskedForColors`, `InitColorSupport` | Medium — replace with `text/tabwriter` |
+
+**cf/trace — two functions total:**
+
+| Function | Plugins | Call Sites | Purpose |
+|---|---|---|---|
+| `trace.NewLogger(writer, verbose, boolsOrPaths...)` | app-autoscaler, cf-app-autoscaler | HTTP transport wrappers | Actual tracing |
+| `trace.NewWriterPrinter(writer, writesToConsole)` | multiapps, ocf-scheduler | Passed to `terminal.NewUI()` as required logger arg | Transitive dependency of `cf/terminal` — removing terminal removes this |
+
+**cf/configuration/confighelpers — two functions total:**
+
+| Function | Plugins | Purpose |
+|---|---|---|
+| `confighelpers.DefaultFilePath()` | cf-targets, app-autoscaler, cf-app-autoscaler, mysql-cli, cfc-cf-targets | Returns `~/.cf/config.json` path (respects `$CF_HOME`) |
+| `confighelpers.PluginRepoDir()` | mysql-cli-plugin only | Returns plugin repo directory |
+
+Replacement: ~5 lines of stdlib code (`$CF_HOME` fallback to `$HOME/.cf`).
+
+**cf/i18n — one variable assignment, both plugins identical:**
+
+```go
+i18n.T = func(translationID string, args ...interface{}) string { return translationID }
+```
+
+Both multiapps and ocf-scheduler set `i18n.T` to a **no-op passthrough**. Neither plugin actually translates strings — they satisfy a dependency of `terminal.NewUI()`. Removing `cf/terminal` eliminates this import entirely.
+
+**Remaining packages — single function each:**
+
+| Package | Plugin | What's Used | Replacement |
+|---|---|---|---|
+| `cf/formatters` | multiapps | `ByteSize()` — 1 call site | Inline or `dustin/go-humanize` |
+| `cf/flags` | Swisscom appcloud | `FlagContext` type — 1 struct field | stdlib `flag` or `pflag` |
+| `util/ui` | mysql-cli-plugin | `NewUI()` → `DisplayBoolPrompt()`, `DisplayText()` — 1 confirmation prompt | `fmt.Print` + `bufio.Scanner` (~10 lines) |
+| `util/configv3` | mysql-cli-plugin | `&configv3.Config{}` — empty struct passed to `ui.NewUI()` | Eliminated when `util/ui` is replaced |
+
+**cf/configuration + coreconfig — the hard case (cf-targets-plugin only):**
+
+`configuration.NewDiskPersistor()`, `coreconfig.NewData()`, `.JSONMarshalV3()` — reads and writes `~/.cf/config.json` directly to implement target switching. The config file format is undocumented and the CLI team is not bound to maintain compatibility. The plugin team has four options, each with trade-offs:
+
+1. **Copy the code** into the plugin (or into `cf-plugin-helpers`). Eliminates the import dependency but the plugin now owns a copy of code that parses an undocumented format — same breakage risk if the CLI team changes the format, just without the compile-time signal.
+2. **Keep the existing import**. Same tight coupling as today. Works as long as the `cf/configuration` packages remain frozen — which they have been since 2020, but is not guaranteed.
+3. **Request CLI team provide a supported integration point** (documented format, plugin RPC method, or supported package). The only path to a stable contract, but depends on CLI team willingness.
+4. **Incorporate the targets functionality into the CF CLI itself.** Target switching is a general-purpose workflow that benefits all CLI users, not just plugin consumers. If adopted as a native CLI feature, the plugin becomes unnecessary and the coupling problem is eliminated entirely.
+
+The choice is a risk tolerance decision for the plugin team. The scanner SHOULD detect and report this coupling regardless of which option is chosen.
+
+**cf/terminal Pattern A — the messy case (multiapps-cli-plugin only):**
+
+multiapps uses the full `cf/terminal` UI framework across 16 production files: `terminal.UI` interface (`Say`, `Warn`, `Failed`, `Ok`, `Table`, `Ask`, `Confirm`), `EntityNameColor` (30+ calls), `CommandColor`, `FailureColor`, `TeePrinter`, `UITable`, and color initialization. The first three options from `cf/configuration` apply here as well, but copying is messier:
+
+1. **Copy the code** into the plugin. Unlike `cf/configuration` (which is self-contained), `cf/terminal` has transitive dependencies on `cf/trace` (for the `Printer` interface required by `NewUI`), `cf/i18n` (for translated strings), and internal types — extracting it requires pulling in multiple packages. The `cfui` package in `cf-plugin-helpers` covers Pattern B basics (`Say`, `Warn`, `Failed`, `Ok`, `Table`, color functions), but multiapps' full usage exceeds what a generic helper provides.
+2. **Keep the existing import**. Works while `cf/terminal` stays frozen — which it has since 2020. Same risk profile as cf-targets.
+3. **Request CLI team extract `cf/terminal` into a standalone module**. Would benefit all 6 plugins that import it, not just multiapps. But depends on CLI team willingness, and the CLI team is not bound to maintain compatibility.
+
+#### Replacement Complexity Summary
+
+| Complexity | Packages | Approach |
+|---|---|---|
+| **Trivial** (1-5 lines stdlib) | `confighelpers`, `cf/formatters`, `cf/flags` | Direct replacement with stdlib or inline code |
+| **Transitive** (eliminated automatically) | `cf/i18n`, half of `cf/trace` | Only imported because `terminal.NewUI()` requires them — removing terminal removes these |
+| **Small** (10-30 lines) | `util/ui`, `cf/trace` (actual tracing) | `bufio.Scanner` for prompts; `log` or custom `Printer` interface for tracing |
+| **Medium** (tabwriter + color) | `cf/terminal` Pattern B (5 plugins) | `text/tabwriter` for tables, optional `fatih/color` for colored output |
+| **Medium-Large** (one plugin) | `cf/terminal` Pattern A (multiapps only) | 16 files, full UI framework — significant but scoped to one plugin team |
+| **Hard** (design-level) | `cf/configuration` + `coreconfig`, `util/configv3` | Config file I/O with undocumented format — no clean drop-in replacement |
+
+#### Addressing the Internal Import Coupling
+
+For the 7 packages rated trivial through medium, standalone replacement packages with matching function signatures can eliminate the coupling entirely — plugins change import paths only, no code changes required. The `cf-plugin-helpers` module design and migration instructions are in the [Proposal: Decoupling Internal Imports via `cf-plugin-helpers`](#decoupling-internal-imports-via-cf-plugin-helpers) section. The 2 hard cases (`cf/configuration` + `coreconfig`, `cf/terminal` Pattern A) require case-by-case risk decisions described in the analysis above.
 
 ### Who Should Migrate
 
@@ -203,13 +280,15 @@ Steps 1–3 require no CLI team involvement. Steps 4–5 happen on the CLI team'
 
 `cf-plugin-migrate scan` is an AST-based audit tool that analyzes a plugin's Go source code and produces a complete inventory of V2 interface usage. It answers the question every plugin developer and migration planner needs answered: **what exactly does this plugin depend on from the V2 interface?**
 
-The scanner detects three categories of usage:
+The scanner detects four categories of usage:
 
 1. **V2 domain method calls** — `GetApp`, `GetApps`, `GetService`, `GetServices`, `GetOrg`, `GetOrgs`, `GetSpace`, `GetSpaces`, `GetOrgUsers`, `GetSpaceUsers`. For each call, it traces which fields of the returned model are actually accessed (e.g., only `Guid` and `Name` out of 20+ available fields on `GetAppModel`).
 
 2. **`CliCommand` / `CliCommandWithoutTerminalOutput` calls** — Every call is detected with its command name and arguments. For `cf curl` calls, the scanner performs deep analysis: endpoint URL extraction, `json.Unmarshal` tracing, target struct type detection, field access tracking, and V2→V3 endpoint mapping.
 
 3. **Session/context method calls** — `AccessToken`, `ApiEndpoint`, `GetCurrentOrg`, `GetCurrentSpace`, etc. These pass through unchanged and require no migration.
+
+4. **Internal CLI package imports** — imports of `code.cloudfoundry.org/cli/cf/*`, `util/*`, or other non-`plugin` packages. For each detected import, the scanner outputs the replacement `cf-plugin-helpers` package path when one exists (see [Decoupling Internal Imports via `cf-plugin-helpers`](#decoupling-internal-imports-via-cf-plugin-helpers)).
 
 **Output:**
 - **Human-readable summary** (stderr) — for quick review
@@ -229,6 +308,16 @@ Found CliCommand calls (legacy — not available in V3 plugin interface):
     → V3 equivalent: /v3/apps (V2 entity/metadata envelope → V3 flat resources)
     → Unmarshalled into: apps (AppsModel)
     → Fields used: NextURL, Resources
+
+Internal CLI package imports detected:
+
+  code.cloudfoundry.org/cli/cf/trace
+    → Replace with: code.cloudfoundry.org/cf-plugin-helpers/cftrace
+    Functions used: NewLogger (api/apihelper.go:47)
+
+  code.cloudfoundry.org/cli/cf/configuration/confighelpers
+    → Replace with: code.cloudfoundry.org/cf-plugin-helpers/cfconfig
+    Functions used: DefaultFilePath (api/endpoint.go:23)
 ```
 
 #### How the YAML Maps V2 Fields to V3 API Calls
@@ -1062,6 +1151,176 @@ func (c *cfConnection) CfClient() *client.Client {
 ```
 
 Note: Unlike the Rabobank library, this companion package does **not** reimplement V2 domain methods via V3. Plugins SHOULD either use go-cfclient directly for domain operations, or use the generated V2 compatibility wrappers that populate only the fields a plugin declares it needs.
+
+### Decoupling Internal Imports via `cf-plugin-helpers`
+
+For the 7 internal packages rated trivial through medium in the [Function-Level Complexity Assessment](#function-level-complexity-assessment), standalone replacement packages with **matching function signatures** allow plugins to migrate by changing import paths only — no code changes required. The replacement functions are best-effort reimplementations, not exact behavioral clones. Only the function signatures need to match.
+
+**Module:** `code.cloudfoundry.org/cf-plugin-helpers` (extends the existing [cli-plugin-helpers](https://github.com/cloudfoundry/cli-plugin-helpers) repository, which already provides `CliConnection` test doubles)
+
+**Packages and signatures:**
+
+```
+cf-plugin-helpers/
+├── cfconfig/        # replaces cf/configuration/confighelpers
+├── cfformat/        # replaces cf/formatters
+├── cftrace/         # replaces cf/trace
+└── cfui/            # replaces cf/terminal
+```
+
+#### `cfconfig` — replaces `cf/configuration/confighelpers` (5 plugins)
+
+```go
+package cfconfig
+
+// DefaultFilePath returns the path to the CF CLI config file.
+// Checks $CF_HOME first, falls back to $HOME/.cf/config.json.
+func DefaultFilePath() string
+
+// PluginRepoDir returns the path to the CF CLI plugin repo directory.
+// Checks $CF_HOME first, falls back to $HOME/.cf/plugins.
+func PluginRepoDir() string
+```
+
+Implementation: ~10 lines of stdlib (`os.Getenv`, `os.UserHomeDir`, `filepath.Join`).
+
+#### `cfformat` — replaces `cf/formatters` (1 plugin)
+
+```go
+package cfformat
+
+// ByteSize returns a human-readable byte size string (e.g., "1.5M", "256K").
+func ByteSize(bytes int64) string
+```
+
+Implementation: ~15 lines of stdlib (`fmt.Sprintf` with unit thresholds).
+
+#### `cftrace` — replaces `cf/trace` and provides V3 call tracing
+
+Replaces `cf/trace` (6 plugins, but 4 are transitive via terminal) and provides HTTP tracing for V3 calls in generated wrappers.
+
+```go
+package cftrace
+
+import "net/http"
+
+// Printer is the interface for trace output.
+type Printer interface {
+    Print(v ...interface{})
+    Printf(format string, v ...interface{})
+    Println(v ...interface{})
+    WritesToConsole() bool
+}
+
+// NewLogger returns a Printer that conditionally logs based on CF_TRACE.
+// boolsOrPaths are checked in order: "true"/"false" toggle console output,
+// any other string is treated as a file path for trace output.
+func NewLogger(writer io.Writer, verbose bool, boolsOrPaths ...string) Printer
+
+// NewWriterPrinter returns a Printer that writes to the given writer.
+func NewWriterPrinter(writer io.Writer, writesToConsole bool) Printer
+
+// NewTracingTransport wraps an http.RoundTripper to log HTTP requests and
+// responses when CF_TRACE is enabled. Output format follows CF CLI conventions:
+// REQUEST/RESPONSE blocks with timestamps, sorted headers, and
+// [PRIVATE DATA HIDDEN] for Authorization headers.
+//
+// If base is nil, http.DefaultTransport is used. The caller is responsible
+// for configuring TLS on the base transport before wrapping — go-cfclient's
+// skipTLSValidation only recognizes *http.Transport and *oauth2.Transport,
+// so the tracing transport must wrap an already-configured base.
+func NewTracingTransport(base http.RoundTripper, logger Printer) http.RoundTripper
+```
+
+Implementation: ~120 lines total. The `Printer` interface and `NewWriterPrinter` are trivial. `NewLogger` checks `CF_TRACE` env var and conditionally writes to console or file. `NewTracingTransport` implements `http.RoundTripper`, dumps request/response when the logger is active, and sanitizes auth headers.
+
+**Why V3 call tracing is required:** Before migration, a plugin calling `conn.GetApp("myapp")` triggers a host-side V2 API call that is visible in `CF_TRACE` output. After migration, the same logical operation becomes a guest-side V3 API call via go-cfclient — completely invisible to `CF_TRACE`. Without tracing, developers debugging issues with the transitional generated code have no way to see what HTTP requests the wrapper is making, what responses CAPI returns, or why a V3 call produces different results than the V2 call it replaced. This is especially critical during the migration period when developers are actively comparing V2 and V3 behavior to verify correctness.
+
+**V3 call tracing in the generated wrapper:** The V2Compat wrapper constructs a go-cfclient `*client.Client` from the plugin's session credentials. When `CF_TRACE` is enabled, the generated code injects `NewTracingTransport` as the base transport via `config.HttpClient()`:
+
+```go
+// In generated V2Compat constructor
+logger := cftrace.NewLogger(os.Stderr, false, os.Getenv("CF_TRACE"))
+transport := cftrace.NewTracingTransport(http.DefaultTransport, logger)
+httpClient := &http.Client{Transport: transport}
+
+cfg, _ := config.New(endpoint,
+    config.Token(token),
+    config.SkipTLSValidation(skipSSL),
+    config.HttpClient(httpClient),
+)
+```
+
+This restores the debugging experience that would otherwise be lost when migrating from host-side V2 calls (visible to `CF_TRACE`) to guest-side V3 calls (invisible without this). Developers running `CF_TRACE=true cf my-plugin-command` will see both the host's RPC traffic and the guest's CAPI V3 traffic.
+
+#### `cfui` — replaces `cf/terminal` Pattern B (5 plugins)
+
+```go
+package cfui
+
+import "code.cloudfoundry.org/cf-plugin-helpers/cftrace"
+
+// UI provides formatted terminal output for CF CLI plugins.
+type UI interface {
+    Say(message string, args ...interface{})
+    Warn(message string, args ...interface{})
+    Failed(message string, args ...interface{})
+    Ok()
+    Table(headers []string) UITable
+}
+
+// UITable supports row-based table output.
+type UITable interface {
+    Add(row ...string)
+    Print()
+}
+
+// TeePrinter captures output while also printing it.
+type TeePrinter struct { /* ... */ }
+
+func NewTeePrinter(w io.Writer) *TeePrinter
+
+// NewUI creates a UI instance.
+func NewUI(in io.Reader, out io.Writer, printer *TeePrinter, logger cftrace.Printer) UI
+
+// Color functions for formatted output.
+func EntityNameColor(message string) string
+func CommandColor(message string) string
+func FailureColor(message string) string
+
+// InitColorSupport initializes color support based on CF_COLOR env var.
+var UserAskedForColors string
+func InitColorSupport()
+```
+
+Implementation: ~100 lines. Tables via `text/tabwriter`, color via `fatih/color` (or ANSI escapes directly), `Say`/`Warn`/`Failed` via `fmt.Fprintf` with color wrapping.
+
+#### Migration Example
+
+**app-autoscaler-cli-plugin** — 2 import path changes, zero code changes:
+
+```go
+// Before (2 imports from CLI internals)
+import (
+    "code.cloudfoundry.org/cli/cf/trace"
+    "code.cloudfoundry.org/cli/cf/configuration/confighelpers"
+)
+
+// After (2 import path changes, zero code changes)
+import (
+    "code.cloudfoundry.org/cf-plugin-helpers/cftrace"
+    "code.cloudfoundry.org/cf-plugin-helpers/cfconfig"
+)
+```
+
+#### What Is NOT Covered by `cf-plugin-helpers`
+
+| Package | Why Not | Guidance |
+|---|---|---|
+| `cf/terminal` Pattern A (multiapps) | 16 files, full UI framework — too deep for a generic helper | Three options: (a) copy `cf/terminal` into the plugin — but it pulls in `cf/trace`, `cf/i18n`, and internal types, (b) keep existing import — works while frozen, (c) request CLI team extract `cf/terminal` into a standalone module. The `cfui` package covers Pattern B basics; multiapps' `EntityNameColor` (30+ calls), `CommandColor`, `FailureColor`, and full `UI` interface require the complete package. CLI team is not bound to maintain compatibility. |
+| `cf/flags` | 1 plugin, 1 struct field — stdlib `flag` or `pflag` is the natural replacement | Scanner should suggest `flag` (stdlib) |
+| `cf/configuration` + `coreconfig` | Reads/writes undocumented config file — no stable contract exists | Four options: (a) copy code into plugin, (b) keep existing import, (c) request CLI team provide supported integration, (d) incorporate targets functionality into the CLI itself. All carry risk — see [analysis in Problem section](#function-level-complexity-assessment). CLI team is not bound to maintain compatibility. |
+| `util/configv3`, `util/ui` | mysql-cli-plugin only; `configv3` usage is a transitive dep of `util/ui`; actual need is one confirmation prompt | Replace `ui.NewUI().DisplayBoolPrompt()` with `fmt.Print` + `bufio.Scanner` |
 
 ### Lessons from the Rabobank Implementation
 

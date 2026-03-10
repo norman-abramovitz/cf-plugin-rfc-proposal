@@ -1177,6 +1177,222 @@ func example(conn CLI) {
 	}
 }
 
+func TestInternalImportDetected(t *testing.T) {
+	source := `package foo
+
+import (
+	"code.cloudfoundry.org/cli/cf/terminal"
+	"code.cloudfoundry.org/cli/plugin"
+)
+
+func example(conn plugin.CliConnection) {
+	_ = terminal.EntityNameColor("hello")
+}
+`
+	result := scanSource(t, source)
+
+	if len(result.InternalImports) != 1 {
+		t.Fatalf("expected 1 internal import, got %d", len(result.InternalImports))
+	}
+	ii := result.InternalImports[0]
+	if ii.ImportPath != "code.cloudfoundry.org/cli/cf/terminal" {
+		t.Errorf("expected cf/terminal import, got %q", ii.ImportPath)
+	}
+	if ii.Replacement != "code.cloudfoundry.org/cf-plugin-helpers/cfui" {
+		t.Errorf("expected cfui replacement, got %q", ii.Replacement)
+	}
+}
+
+func TestInternalImportV8Path(t *testing.T) {
+	source := `package foo
+
+import "code.cloudfoundry.org/cli/v8/cf/trace"
+
+func example() {}
+`
+	result := scanSource(t, source)
+
+	if len(result.InternalImports) != 1 {
+		t.Fatalf("expected 1 internal import, got %d", len(result.InternalImports))
+	}
+	if result.InternalImports[0].Replacement != "code.cloudfoundry.org/cf-plugin-helpers/cftrace" {
+		t.Errorf("unexpected replacement: %q", result.InternalImports[0].Replacement)
+	}
+}
+
+func TestAllowedImportsNotFlagged(t *testing.T) {
+	source := `package foo
+
+import (
+	"code.cloudfoundry.org/cli/plugin"
+	"code.cloudfoundry.org/cli/plugin/models"
+)
+
+func example(conn plugin.CliConnection) {}
+`
+	result := scanSource(t, source)
+
+	if len(result.InternalImports) != 0 {
+		t.Errorf("expected 0 internal imports for allowed packages, got %d", len(result.InternalImports))
+		for _, ii := range result.InternalImports {
+			t.Logf("  unexpected: %s", ii.ImportPath)
+		}
+	}
+}
+
+func TestMultipleInternalImports(t *testing.T) {
+	source := `package foo
+
+import (
+	"code.cloudfoundry.org/cli/cf/terminal"
+	"code.cloudfoundry.org/cli/cf/trace"
+	"code.cloudfoundry.org/cli/cf/configuration/confighelpers"
+	"code.cloudfoundry.org/cli/plugin"
+)
+
+func example() {}
+`
+	result := scanSource(t, source)
+
+	if len(result.InternalImports) != 3 {
+		t.Fatalf("expected 3 internal imports, got %d", len(result.InternalImports))
+	}
+}
+
+func TestUnknownInternalImport(t *testing.T) {
+	source := `package foo
+
+import "code.cloudfoundry.org/cli/some/unknown/package"
+
+func example() {}
+`
+	result := scanSource(t, source)
+
+	if len(result.InternalImports) != 1 {
+		t.Fatalf("expected 1 internal import, got %d", len(result.InternalImports))
+	}
+	ii := result.InternalImports[0]
+	if ii.Replacement != "" {
+		t.Errorf("expected empty replacement for unknown package, got %q", ii.Replacement)
+	}
+	if !strings.Contains(ii.Note, "Unknown") {
+		t.Errorf("expected unknown note, got %q", ii.Note)
+	}
+}
+
+func TestConfighelpersImportReplacement(t *testing.T) {
+	source := `package foo
+
+import "code.cloudfoundry.org/cli/cf/configuration/confighelpers"
+
+func example() {
+	_ = confighelpers.DefaultFilePath()
+}
+`
+	result := scanSource(t, source)
+
+	if len(result.InternalImports) != 1 {
+		t.Fatalf("expected 1 internal import, got %d", len(result.InternalImports))
+	}
+	ii := result.InternalImports[0]
+	if ii.Replacement != "code.cloudfoundry.org/cf-plugin-helpers/cfconfig" {
+		t.Errorf("expected cfconfig replacement, got %q", ii.Replacement)
+	}
+}
+
+func TestInternalImportYAMLOutput(t *testing.T) {
+	result := &ScanResult{
+		Package: "foo",
+		Methods: make(map[string]*MethodResult),
+		InternalImports: []*InternalImport{
+			{
+				File:        "main.go",
+				ImportPath:  "code.cloudfoundry.org/cli/cf/trace",
+				Replacement: "code.cloudfoundry.org/cf-plugin-helpers/cftrace",
+				Note:        "import swap, no code changes",
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := result.WriteYAML(&buf); err != nil {
+		t.Fatal(err)
+	}
+
+	yaml := buf.String()
+	for _, want := range []string{
+		"internal_imports:",
+		"code.cloudfoundry.org/cli/cf/trace",
+		"code.cloudfoundry.org/cf-plugin-helpers/cftrace",
+	} {
+		if !strings.Contains(yaml, want) {
+			t.Errorf("YAML missing %q:\n%s", want, yaml)
+		}
+	}
+}
+
+func TestInternalImportSummaryOutput(t *testing.T) {
+	result := &ScanResult{
+		Package: "foo",
+		Methods: make(map[string]*MethodResult),
+		InternalImports: []*InternalImport{
+			{
+				File:        "main.go",
+				ImportPath:  "code.cloudfoundry.org/cli/cf/terminal",
+				Replacement: "code.cloudfoundry.org/cf-plugin-helpers/cfui",
+				Note:        "import swap for Pattern B",
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	result.WriteSummary(&buf)
+	out := buf.String()
+
+	for _, want := range []string{
+		"Internal CLI package imports detected",
+		"code.cloudfoundry.org/cli/cf/terminal",
+		"Replace with: code.cloudfoundry.org/cf-plugin-helpers/cfui",
+		"import swap for Pattern B",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("summary missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOnlyInternalImportsNoMethods(t *testing.T) {
+	// File with only internal imports and no V2 method calls should still produce output
+	source := `package foo
+
+import "code.cloudfoundry.org/cli/cf/terminal"
+
+func example() {
+	_ = terminal.EntityNameColor("hello")
+}
+`
+	result := scanSource(t, source)
+
+	if len(result.InternalImports) == 0 {
+		t.Fatal("expected internal imports to be detected")
+	}
+
+	// Should not produce "No V2 domain method calls found"
+	var buf bytes.Buffer
+	result.WriteSummary(&buf)
+	if strings.Contains(buf.String(), "No V2 domain method calls found") {
+		t.Error("should not show empty message when internal imports exist")
+	}
+
+	var yamlBuf bytes.Buffer
+	if err := result.WriteYAML(&yamlBuf); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(yamlBuf.String(), "No V2 domain method calls found") {
+		t.Error("YAML should not show empty message when internal imports exist")
+	}
+}
+
 func TestWriteSummaryWriteError(t *testing.T) {
 	var captured error
 	orig := onWriteErr

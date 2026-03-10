@@ -35,6 +35,8 @@ import (
 	plugin_models "code.cloudfoundry.org/cli/plugin/models"
 {{- if .HasDomain}}
 	"context"
+	"net/http"
+	"os"
 {{- end}}
 {{- if .NeedsStrings}}
 	"strings"
@@ -44,6 +46,7 @@ import (
 {{- end}}
 {{- if .HasDomain}}
 
+	"code.cloudfoundry.org/cf-plugin-helpers/cftrace"
 	"github.com/cloudfoundry/go-cfclient/v3/client"
 	"github.com/cloudfoundry/go-cfclient/v3/config"
 {{- end}}
@@ -71,7 +74,8 @@ type V2Compat struct {
 // NewV2Compat creates a V2Compat that wraps the given CliConnection.
 {{- if .HasDomain}}
 // It initializes a go-cfclient client using the session's access token
-// and API endpoint for CAPI V3 domain method calls.
+// and API endpoint for CAPI V3 domain method calls. When CF_TRACE is
+// enabled, HTTP requests and responses are logged to stderr.
 func NewV2Compat(conn plugin.CliConnection) (*V2Compat, error) {
 	endpoint, err := conn.ApiEndpoint()
 	if err != nil {
@@ -87,7 +91,12 @@ func NewV2Compat(conn plugin.CliConnection) (*V2Compat, error) {
 		token = token[7:]
 	}
 
-	cfg, err := config.New(endpoint, config.Token(token, ""), config.SkipTLSValidation())
+	// Set up CF_TRACE-aware HTTP transport for debugging V3 calls.
+	logger := cftrace.NewLogger(os.Stderr, false, os.Getenv("CF_TRACE"))
+	transport := cftrace.NewTracingTransport(http.DefaultTransport, logger)
+	httpClient := &http.Client{Transport: transport}
+
+	cfg, err := config.New(endpoint, config.Token(token, ""), config.SkipTLSValidation(), config.HttpClient(httpClient))
 	if err != nil {
 		return nil, err
 	}

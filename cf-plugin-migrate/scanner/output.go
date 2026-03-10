@@ -12,7 +12,7 @@ import (
 
 // WriteYAML writes the scan result as a cf-plugin-migrate.yml file.
 func (r *ScanResult) WriteYAML(w io.Writer) error {
-	if len(r.Methods) == 0 && len(r.CliCommandCalls) == 0 {
+	if len(r.Methods) == 0 && len(r.CliCommandCalls) == 0 && len(r.InternalImports) == 0 {
 		checkWriteErr(fmt.Fprintln(w, "# No V2 domain method calls found."))
 		return nil
 	}
@@ -132,6 +132,30 @@ func (r *ScanResult) WriteYAML(w io.Writer) error {
 		}
 	}
 
+	// internal_imports section — CLI internal package imports
+	if len(r.InternalImports) > 0 {
+		root.Content = append(root.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "internal_imports"},
+		)
+
+		importsSeq := &yaml.Node{Kind: yaml.SequenceNode}
+		root.Content = append(root.Content, importsSeq)
+
+		for _, ii := range r.InternalImports {
+			entry := &yaml.Node{Kind: yaml.MappingNode}
+			importsSeq.Content = append(importsSeq.Content, entry)
+
+			addScalar(entry, "file", ii.File)
+			addScalar(entry, "import", ii.ImportPath)
+			if ii.Replacement != "" {
+				addScalar(entry, "replacement", ii.Replacement)
+			}
+			if ii.Note != "" {
+				addScalar(entry, "note", ii.Note)
+			}
+		}
+	}
+
 	enc := yaml.NewEncoder(w)
 	enc.SetIndent(2)
 	if err := enc.Encode(doc); err != nil {
@@ -142,7 +166,7 @@ func (r *ScanResult) WriteYAML(w io.Writer) error {
 
 // WriteSummary writes a human-readable summary of the scan to w.
 func (r *ScanResult) WriteSummary(w io.Writer) {
-	if len(r.Methods) == 0 && len(r.CliCommandCalls) == 0 {
+	if len(r.Methods) == 0 && len(r.CliCommandCalls) == 0 && len(r.InternalImports) == 0 {
 		checkWriteErr(fmt.Fprintln(w, "No V2 domain method calls found."))
 		return
 	}
@@ -232,6 +256,24 @@ func (r *ScanResult) WriteSummary(w io.Writer) {
 					fields := sortedKeys(cc.Fields)
 					checkWriteErr(fmt.Fprintf(w, "    → Fields used: %s\n", strings.Join(fields, ", ")))
 				}
+			}
+			checkWriteErr(fmt.Fprintln(w))
+		}
+	}
+
+	// Internal CLI package imports
+	if len(r.InternalImports) > 0 {
+		checkWriteErr(fmt.Fprintln(w, "Internal CLI package imports detected (not part of public plugin contract):"))
+		checkWriteErr(fmt.Fprintln(w))
+
+		for _, ii := range r.InternalImports {
+			checkWriteErr(fmt.Fprintf(w, "  %s\n", ii.File))
+			checkWriteErr(fmt.Fprintf(w, "    import: %s\n", ii.ImportPath))
+			if ii.Replacement != "" {
+				checkWriteErr(fmt.Fprintf(w, "    → Replace with: %s\n", ii.Replacement))
+			}
+			if ii.Note != "" {
+				checkWriteErr(fmt.Fprintf(w, "    → %s\n", ii.Note))
 			}
 			checkWriteErr(fmt.Fprintln(w))
 		}

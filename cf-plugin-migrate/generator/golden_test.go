@@ -1,6 +1,7 @@
 package generator
 
 import (
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,15 +16,7 @@ import (
 //
 // The golden files are checked into version control so regressions are caught
 // by CI without needing the -update flag.
-var update = false
-
-func init() {
-	for _, arg := range os.Args {
-		if arg == "-update" {
-			update = true
-		}
-	}
-}
+var update = flag.Bool("update", false, "update golden files")
 
 func TestGoldenFiles(t *testing.T) {
 	ymls, err := filepath.Glob("testdata/*_plugin.yml")
@@ -49,7 +42,7 @@ func TestGoldenFiles(t *testing.T) {
 				t.Fatalf("generating from %s: %v", yml, err)
 			}
 
-			if update {
+			if *update {
 				if err := os.WriteFile(goldenPath, got, 0644); err != nil {
 					t.Fatalf("updating golden file %s: %v", goldenPath, err)
 				}

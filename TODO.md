@@ -28,11 +28,11 @@
 
 ### Decisions Made
 
-- [x] `CfClient()` placement → **Companion package** (`cli-plugin-helpers/cfclient`), not core contract. Core contract provides only serializable primitives. See RFC "CF Client Access" section.
-- [x] Communication architecture → **Channel abstraction** (`Send`/`Receive`/`Open`/`Close`) with `GobTCPChannel` (legacy) and `JsonRpcChannel` (new polyglot). See RFC "Communication Architecture" section.
-- [x] Message format → **JSON-RPC 2.0** for new-protocol plugins. stdout/stderr reserved for plugin user output.
-- [x] Install-time metadata → **Embedded `CF_PLUGIN_METADATA:` marker** scanned from the binary/script. No execution needed. Legacy plugins detected by absence of marker.
-- [x] `CliCommand`/`CliCommandWithoutTerminalOutput` → **Legacy protocol only**. Not part of the new JSON-RPC contract. Plugins use their own clients for CAPI access.
+- [x] `CfClient()` placement → **Companion package** (`cli-plugin-helpers/cfclient`), not core contract. Core contract provides only serializable primitives. **Rationale:** The core contract (`PluginContext`) must be language-agnostic — serializable strings and bools that any JSON-RPC client can consume. A Go-specific `*client.Client` cannot be serialized across the wire. Placing it in a companion package keeps the core contract polyglot while giving Go plugins a convenient one-liner to get a configured go-cfclient. See RFC "CF Client Access" section.
+- [x] Communication architecture → **Channel abstraction** (`Send`/`Receive`/`Open`/`Close`) with `GobTCPChannel` (legacy) and `JsonRpcChannel` (new polyglot). **Rationale:** The existing gob/net-rpc protocol cannot be changed without breaking all existing plugins. A channel abstraction lets the host support both legacy (gob) and new (JSON-RPC) protocols simultaneously, with protocol selection driven by the plugin's embedded metadata marker. This avoids a flag-day migration — existing plugins work unchanged, new plugins opt into JSON-RPC. See RFC "Communication Architecture" section.
+- [x] Message format → **JSON-RPC 2.0** for new-protocol plugins. stdout/stderr reserved for plugin user output. **Rationale:** JSON-RPC 2.0 is a simple, well-specified standard with client libraries in every language, enabling polyglot plugins (Python, Perl, Java, etc.). It uses a separate TCP transport rather than stdout/stdin, leaving stdout/stderr available for plugin user-facing output — matching the existing behavior where plugins write directly to the terminal. Custom binary protocols or gRPC were rejected as unnecessarily complex for the small message surface (session context, lifecycle events).
+- [x] Install-time metadata → **Embedded `CF_PLUGIN_METADATA:` marker** scanned from the binary/script. No execution needed. Legacy plugins detected by absence of marker. **Rationale:** The current install flow executes the plugin binary with a `SendMetadata` argument to retrieve metadata — this requires the binary to be runnable on the host platform, prevents cross-platform plugin repos, and is a security concern (arbitrary code execution at install time). Scanning for an embedded marker is safe, fast, and works for any language (compiled binaries, scripts with the marker in a comment, JARs with the marker in a resource). Absence of the marker tells the host this is a legacy Go plugin, enabling graceful fallback.
+- [x] `CliCommand`/`CliCommandWithoutTerminalOutput` → **Legacy protocol only**. Not part of the new JSON-RPC contract. Plugins use their own clients for CAPI access. **Rationale:** These methods ask the host to execute arbitrary CLI commands on the plugin's behalf — creating tight coupling to CLI command names, output format, and behavior across versions. They exist because the original plugin interface provided no other way to access CAPI. With the new contract providing session credentials and endpoint URLs, plugins can call CAPI directly using their own HTTP clients. Carrying `CliCommand` forward would perpetuate the fragile parsing patterns and host-side complexity that this RFC aims to eliminate.
 
 ### Decisions Still Needed
 
@@ -43,7 +43,7 @@
 - [ ] Add error handling and edge case guidance (expired tokens, no target, plugin crashes mid-stream)
 - [ ] Decide: How to pass connection info to new-protocol plugins (env vars `CF_PLUGIN_PORT`, `CF_PLUGIN_PROTOCOL` vs. other mechanism)
 - [ ] Decide: Does the message serialization format need to be fixed to JSON? The channel abstraction could support alternative serialization formats (e.g., MessagePack, CBOR, Protobuf) alongside JSON-RPC — the `CF_PLUGIN_METADATA:` marker could declare the preferred format.
-- [ ] Decide: Should the Plugin SDK include interfaces/functions to cover the non-plugin CLI internal packages that 8 plugins import (`cf/terminal`, `cf/trace`, `cf/configuration/confighelpers`, `cf/i18n`, `cf/flags`, `util/configv3`, `util/ui`)? If so, which RFC covers this — the transitional migration RFC or the main V3 plugin interface RFC? These are not part of the plugin contract but are de facto dependencies for nearly half the plugin ecosystem.
+- [x] Decide: Should the Plugin SDK include interfaces/functions to cover the non-plugin CLI internal packages that 8 plugins import? **No — separate `cf-plugin-helpers` module.** The Plugin SDK covers only the plugin contract types (`plugin.Plugin`, `plugin.CliConnection`, `plugin/models/*`). Internal package replacements belong in `cf-plugin-helpers` as standalone packages with matching function signatures, enabling import-swap migration. **Rationale:** The Plugin SDK's purpose is build-time decoupling of the plugin contract — it must mirror the host's wire format exactly and stay in lockstep with the host's type definitions. Mixing in unrelated utility packages (terminal UI, tracing, config path helpers) would bloat the SDK, create false coupling between contract types and utility code, and force SDK version bumps for utility changes that have nothing to do with the wire protocol. The `cf-plugin-helpers` module already exists (it provides `CliConnection` test doubles) and is the natural home for plugin-side utilities that don't affect the host-guest contract. See [transitional RFC "Decoupling via cf-plugin-helpers"](rfc-draft-plugin-transitional-migration.md#decoupling-internal-imports-via-cf-plugin-helpers).
 - [x] Discuss Rabobank transitional wrapper caveats → V2-to-V3 data shape differences (IsAdmin, single process, single buildpack, missing stats) resolved by generated wrapper approach. Implementation bugs (token prefix, SSL, user agent) documented. See [transitional RFC](rfc-draft-plugin-transitional-migration.md#lessons-from-the-rabobank-implementation).
 
 ### Stakeholder Review
@@ -73,14 +73,38 @@
     - [x] Golden file tests: 4 fixtures (session_only_plugin, getapp_guid_only_plugin, ocf_scheduler_plugin, metric_registrar_plugin) with -update flag for regeneration
     - [x] CLI flags: Added `-h`/`--help`/`help` support for all subcommands, `-o` output flag for generate, proper `flag.FlagSet` parsing, usage examples
     - [x] Error messages: Config-not-found suggests running scan, unknown command shows usage
-  - [ ] Phase H: Scanner — detect CLI internal package imports (`code.cloudfoundry.org/cli/...` beyond `plugin` and `plugin/models`). Report in human-readable summary and in YAML as `internal_imports` section. This should ship even without replacement suggestions — detection alone is valuable for migration planning.
-  - [ ] Phase H+: Add validated replacement suggestions to the scanner output for each detected internal import. Requires research (see below) to ensure suggestions are correct before presenting them to developers.
+  - [x] Phase H: Scanner — detect CLI internal package imports (`code.cloudfoundry.org/cli/...` beyond `plugin` and `plugin/models`). Reports in human-readable summary and YAML `internal_imports` section. Implemented in `scanner/imports.go` with 20 known import paths (both old and v8 variants). 9 new tests.
+  - [x] Phase H+: Scanner outputs replacement suggestions (`cf-plugin-helpers` import paths) for each detected internal import. 9 of 11 replacements covered. Remaining 2 are per-plugin issues:
+    - `cf/terminal` Pattern A (multiapps): scanner detects and suggests `cfui` but notes "Pattern A may need additional work"
+    - `cf/configuration` + `coreconfig` (cf-targets): scanner detects and notes "no drop-in replacement, see RFC for options"
 - [x] Document token lifecycle pattern (`config.TokenProvider()` for long-running plugins) — see [transitional RFC token lifecycle](rfc-draft-plugin-transitional-migration.md#token-lifecycle)
 - [x] Proof-of-concept: Analyze and walk through list-services migration (Tier 1: simple) — see [transitional RFC worked example](rfc-draft-plugin-transitional-migration.md#list-services-tier-1-simplest-domain-method-migration). Key finding: plugin is already 90% V3; demonstrates all three coupling patterns (V2 domain method, cf curl, CLI internal imports) in simplest form.
 - [x] Proof-of-concept: Analyze and walk through OCF Scheduler migration (Tier 2: moderate) — see [transitional RFC worked example](rfc-draft-plugin-transitional-migration.md#worked-example-ocf-scheduler-plugin)
 - [x] Proof-of-concept: Analyze and walk through metric-registrar migration (Tier 3: complex) — see [transitional RFC worked example](rfc-draft-plugin-transitional-migration.md#worked-example-metric-registrar-plugin-complex-migration)
 - [x] Analyze Rabobank consumer plugins to verify whether full V2 reimplementation was necessary — see [transitional RFC consumer analysis](rfc-draft-plugin-transitional-migration.md#consumer-plugin-analysis-was-the-full-reimplementation-necessary)
 - [x] Deep analysis: V2 app ports → V3 route destinations migration (internal routes, metric-registrar use case) — see [transitional RFC deep analysis](rfc-draft-plugin-transitional-migration.md#deep-analysis-v2-ports--v3-route-destinations). Key finding: V3 has no equivalent of V2 `ports` array for non-routable container ports. Migration requires internal routes + destinations (cross-component redesign with platform scraper).
+
+## cf-plugin-helpers Decoupling Packages
+
+Standalone replacement packages with matching function signatures so plugins migrate by changing import paths only. Best-effort behavior — only signatures need to be exact matches. See [transitional RFC design](rfc-draft-plugin-transitional-migration.md#decoupling-internal-imports-via-cf-plugin-helpers).
+
+- [x] `cfconfig` package — replaces `cf/configuration/confighelpers` (5 plugins). Two functions: `DefaultFilePath()`, `PluginRepoDir()`. Implemented with `$CF_HOME` fallback. 5 tests.
+- [x] `cfformat` package — replaces `cf/formatters` (1 plugin). One function: `ByteSize(int64) string`. Implements B/K/M/G/T formatting. 7 test cases.
+- [x] `cftrace` package — replaces `cf/trace` (6 plugins) and provides V3 call tracing. `Printer` interface + `NewLogger()` + `NewWriterPrinter()` + `NewTracingTransport()`. `NewTracingTransport` wraps `http.RoundTripper` to log HTTP request/response when `CF_TRACE` is enabled with `[PRIVATE DATA HIDDEN]` for auth headers. 10 tests.
+- [x] `cfui` package — replaces `cf/terminal` Pattern B (5 plugins). `UI` interface (`Say`, `Warn`, `Failed`, `Ok`, `Table`), `TeePrinter`, color functions (`EntityNameColor`, `CommandColor`, `FailureColor`), `InitColorSupport()`. Uses `text/tabwriter` + ANSI escapes. 11 tests.
+- [x] Update `cf-plugin-migrate scan` (Phase H+) to output replacement import paths when internal packages are detected. Scanner outputs `cf-plugin-helpers` paths in both summary and YAML.
+- [x] Update `cf-plugin-migrate generate` to wire `cftrace.NewTracingTransport` into generated V2Compat constructor. CF_TRACE-aware tracing injected automatically via `config.HttpClient()`. Golden files regenerated.
+- [x] Fix golden test `-update` flag to use `flag.Bool` instead of manual `os.Args` scan — `go test -update` now works.
+- [ ] Validate import-swap migration with at least one real plugin (e.g., app-autoscaler: 2 import path changes, zero code changes).
+
+**Not covered by cf-plugin-helpers** (per-plugin remediation):
+- `cf/terminal` Pattern A (multiapps — 16 files, full UI framework). Same three-option pattern as `cf/configuration`: (a) copy `cf/terminal` into plugin — but it pulls in `cf/trace`, `cf/i18n`, and internal types, not a clean extract, (b) keep existing import — works while frozen, (c) request CLI team extract into standalone module. CLI team is not bound to maintain compatibility.
+- `cf/flags` (Swisscom appcloud — 1 struct field, use stdlib `flag`)
+- `cf/configuration` + `coreconfig` (cf-targets — see below)
+
+**CLI team engagement (optional):**
+- [ ] Request CLI team consider providing a supported integration point for plugin config file access (`cf/configuration` + `coreconfig`). cf-targets-plugin reads and writes `~/.cf/config.json` directly to implement target switching. The config file format is undocumented and the CLI team is not bound to maintain compatibility. Three options exist: (a) copy the code into the plugin or `cf-plugin-helpers` — eliminates import but owns an undocumented format, (b) keep the existing import — same tight coupling as today, works while packages remain frozen, (c) CLI team provides a supported integration point (documented format, plugin RPC method, or supported package) — the only path to a stable contract. The choice is a risk tolerance decision for the plugin team. Option (c) is the best outcome but depends on CLI team willingness.
+- `util/configv3` + `util/ui` (mysql-cli — transitive; eliminate by replacing one confirmation prompt)
 
 ## Reference Implementation
 
@@ -161,19 +185,30 @@
 - [ ] Create GitHub issues for plugins with host-code coupling
 - [ ] Create Jira tickets for tracking host-code coupling remediation
 - [x] Document coupling patterns in the transitional migration RFC (audience: managers/reviewers need to understand the blast radius of CLI internal changes) — see [transitional RFC "Plugins Import CLI Internal Packages"](rfc-draft-plugin-transitional-migration.md#plugins-import-cli-internal-packages)
-- [ ] Validate replacement suggestions for each CLI internal package before adding to scanner. Analysis so far:
+- [x] Function-level audit of all CLI internal package usage across plugins — documented in [transitional RFC "Function-Level Complexity Assessment"](rfc-draft-plugin-transitional-migration.md#function-level-complexity-assessment). Key finding: **7 of 9 packages are trivial to replace** (a few functions each, not major integrations). `cf/i18n` and half of `cf/trace` are transitive dependencies of `cf/terminal` — removing terminal eliminates them.
+- [ ] Validate replacement suggestions for each CLI internal package before adding to scanner:
 
-  | Internal Package | What plugins use it for | Candidate replacement | Open questions |
-  |---|---|---|---|
-  | `cf/terminal` | Table formatting, colored output (`ui.Failed()`, `ui.Say()`, `ui.Table()`) | `text/tabwriter` for tables; `fatih/color` or `charmbracelet/lipgloss` for color | `text/tabwriter` handles alignment but not color. Plugins using colored error/success output would lose that with tabwriter alone. Need to assess which plugins actually use color vs. just tables. |
-  | `cf/trace` | HTTP request/response debug logging, controlled by `CF_TRACE` env var | `log` package | `log` doesn't replicate `CF_TRACE` env var behavior. Users expect `CF_TRACE=true` to show HTTP traffic from plugins. A proper replacement needs to check that env var and conditionally log HTTP round-trips. |
-  | `cf/configuration/confighelpers` | `DefaultFilePath()` — finds `~/.cf/config.json` | `os.UserConfigDir()` + `filepath.Join(".cf")` | `os.UserConfigDir()` returns `~/.config` on Linux, not `~/.cf`. The actual path logic in `confighelpers` handles `$CF_HOME` env var override. Suggestion is incomplete without `CF_HOME` handling. |
-  | `cf/configuration` + `coreconfig` | Read/write `~/.cf/config.json` directly (cf-targets-plugin only) | Direct JSON parsing of config file | The config file format is undocumented. Parsing it directly makes the plugin depend on an undocumented file format instead of an undocumented Go API — arguably same risk, different form. |
-  | `cf/i18n` | Internationalized strings | `golang.org/x/text` or inline strings | `cf/i18n` has CLI-specific translation catalogs. Plugins would need to decide whether to carry their own translations or drop i18n support. |
-  | `cf/flags` | CLI flag parsing | `flag` (stdlib) or `pflag` | Straightforward swap. `cf/flags` has some custom behavior but standard `flag` covers most cases. |
-  | `cf/formatters` | `ByteSize()` — human-readable byte formatting | `fmt.Sprintf` with custom formatting, or `dustin/go-humanize` | Simple enough to inline. Low risk. |
-  | `util/configv3` | Full CLI config access (target, auth, K8s) — mysql-cli-plugin only | Direct config file access | Hardest replacement. `configv3` is a complex internal config layer with K8s support, user config interface, and environment variable handling. "Direct config file access" is hand-waving. Needs deep analysis of what mysql-cli-plugin actually reads from it. |
-  | `util/ui` | Structured output, diff display — mysql-cli-plugin only | `text/tabwriter` or `fmt` | Depends on how much of the `ui` API the plugin uses. `util/ui` has methods like `DisplayDiffAddition`, `DisplayTextLiteral` that go beyond simple table printing. |
+  | Complexity | Package | Actual Functions Used | Replacement | Status |
+  |---|---|---|---|---|
+  | Trivial | `confighelpers` | `DefaultFilePath()`, `PluginRepoDir()` — 2 functions | ~5 lines stdlib (`$CF_HOME` → `$HOME/.cf` fallback) | **Ready** — can add to scanner |
+  | Trivial | `cf/formatters` | `ByteSize()` — 1 call site (multiapps) | Inline or `dustin/go-humanize` | **Ready** — can add to scanner |
+  | Trivial | `cf/flags` | `FlagContext` type — 1 struct field (Swisscom appcloud) | stdlib `flag` or `pflag` | **Ready** — can add to scanner |
+  | Transitive | `cf/i18n` | `i18n.T` set to no-op passthrough — both plugins | Eliminated by removing `cf/terminal` | **Ready** — scanner should note transitive dependency |
+  | Transitive | `cf/trace` (partial) | `NewWriterPrinter()` — passed to `terminal.NewUI()` | Eliminated by removing `cf/terminal` | **Ready** — scanner should note transitive dependency |
+  | Small | `cf/trace` (actual) | `NewLogger()` — app-autoscaler HTTP tracing | `cftrace.NewLogger()` — same package also provides `NewTracingTransport` for V3 calls | **Ready** — CF_TRACE decision resolved |
+  | Small | `util/ui` | `NewUI()` → `DisplayBoolPrompt()`, `DisplayText()` — 1 prompt (mysql-cli) | `fmt.Print` + `bufio.Scanner` (~10 lines) | **Ready** — can add to scanner |
+  | Medium | `cf/terminal` Pattern B | `NewUI`, `NewTeePrinter`, `InitColorSupport` — 5 plugins, UI bootstrap only | `text/tabwriter` for tables, optional `fatih/color` | **Ready** — can add to scanner |
+  | Medium-Large | `cf/terminal` Pattern A | Full UI framework — multiapps only, 16 files, 30+ `EntityNameColor` calls | `text/tabwriter` + `fatih/color` or `charmbracelet/lipgloss` | Per-plugin remediation, not scanner suggestion |
+  | Hard | `cf/configuration` + `coreconfig` | `NewDiskPersistor()`, `NewData()`, `.JSONMarshalV3()` — cf-targets only | No clean drop-in; undocumented config file format | Needs design-level resolution |
+  | Hard | `util/configv3` | `&configv3.Config{}` empty struct passed to `ui.NewUI()` — mysql-cli only | Eliminated when `util/ui` is replaced | **Ready** — transitive dependency of `util/ui` |
+
+## CF_TRACE Behavioral Regression
+
+- [x] Research: Does go-cfclient v3 have built-in tracing/debug support? **No.** No `CF_TRACE`, no debug logging, no request/response dumping.
+- [x] Research: Can tracing be injected? **Yes.** `config.HttpClient(*http.Client)` accepts a custom HTTP client. A tracing `http.RoundTripper` can wrap the base transport. Transport chain: `retryableAuthTransport` → `oauth2.Transport` → user's Transport.
+- [x] Research: TLS caveat identified. go-cfclient's `getHTTPTransport()` only recognizes `*http.Transport` or `*oauth2.Transport` for `skipTLSValidation`. Custom `RoundTripper` types won't get TLS config applied automatically — the tracing transport must wrap a properly configured `*http.Transport`.
+- [x] Research: CF_TRACE output format. CLI uses REQUEST/RESPONSE blocks with timestamps, sorted headers, `[PRIVATE DATA HIDDEN]` for auth headers, JSON body pretty-printing/sanitization.
+- [x] Decide: **Yes — `cftrace.NewTracingTransport()` in `cf-plugin-helpers/cftrace`.** Without this, developers debugging issues with the transitional generated code cannot see what HTTP requests the V2Compat wrapper makes to CAPI V3, what responses it receives, or why a V3 call produces different results than the V2 call it replaced. Before migration, `CF_TRACE=true` shows the host's V2 API calls; after migration, the same operations happen guest-side via go-cfclient and are invisible. Tracing is essential during the migration period when developers are actively verifying V2-to-V3 behavioral equivalence. Generated V2Compat wrapper injects it automatically via `config.HttpClient()`. Output is best-effort CF CLI format (REQUEST/RESPONSE blocks, auth header sanitization). Lives in `cftrace` package alongside `Printer`/`NewLogger`/`NewWriterPrinter`, so it serves both the legacy `cf/trace` replacement role and the V3 call tracing role. See [transitional RFC cftrace design](rfc-draft-plugin-transitional-migration.md#decoupling-internal-imports-via-cf-plugin-helpers).
 
 ## Future RFCs (Out of Scope)
 

@@ -16,6 +16,15 @@ type ScanResult struct {
 	Package         string
 	Methods         map[string]*MethodResult
 	CliCommandCalls []*CliCommandCall
+	InternalImports []*InternalImport
+}
+
+// InternalImport records a CLI internal package import detected in guest code.
+type InternalImport struct {
+	File        string
+	ImportPath  string
+	Replacement string // cf-plugin-helpers replacement path, or empty
+	Note        string // guidance for the developer
 }
 
 // MethodResult holds detected fields for one V2 method.
@@ -107,6 +116,29 @@ func scanFile(path string, result *ScanResult) error {
 
 	if result.Package == "" {
 		result.Package = f.Name.Name
+	}
+
+	// Detect CLI internal package imports.
+	for _, imp := range f.Imports {
+		importPath := strings.Trim(imp.Path.Value, `"`)
+		if !isCLIImport(importPath) {
+			continue
+		}
+		if isAllowedImport(importPath) {
+			continue
+		}
+
+		ii := &InternalImport{
+			File:       path,
+			ImportPath: importPath,
+		}
+		if repl, ok := InternalImportReplacements[importPath]; ok {
+			ii.Replacement = repl.Replacement
+			ii.Note = repl.Note
+		} else {
+			ii.Note = "Unknown CLI internal package — review manually"
+		}
+		result.InternalImports = append(result.InternalImports, ii)
 	}
 
 	for _, decl := range f.Decls {
