@@ -74,7 +74,7 @@
 - [x] Proof-of-concept: Analyze and walk through OCF Scheduler migration (Tier 2: moderate) — see [transitional RFC worked example](rfc-draft-plugin-transitional-migration.md#worked-example-ocf-scheduler-plugin)
 - [x] Proof-of-concept: Analyze and walk through metric-registrar migration (Tier 3: complex) — see [transitional RFC worked example](rfc-draft-plugin-transitional-migration.md#worked-example-metric-registrar-plugin-complex-migration)
 - [x] Analyze Rabobank consumer plugins to verify whether full V2 reimplementation was necessary — see [transitional RFC consumer analysis](rfc-draft-plugin-transitional-migration.md#consumer-plugin-analysis-was-the-full-reimplementation-necessary)
-- [ ] Deep analysis: V2 app ports → V3 route destinations migration (internal routes, metric-registrar use case)
+- [x] Deep analysis: V2 app ports → V3 route destinations migration (internal routes, metric-registrar use case) — see [transitional RFC deep analysis](rfc-draft-plugin-transitional-migration.md#deep-analysis-v2-ports--v3-route-destinations). Key finding: V3 has no equivalent of V2 `ports` array for non-routable container ports. Migration requires internal routes + destinations (cross-component redesign with platform scraper).
 
 ## Reference Implementation
 

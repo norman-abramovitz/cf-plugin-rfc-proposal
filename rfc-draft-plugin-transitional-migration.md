@@ -828,7 +828,44 @@ _, err := cfClient.RouteDestinations.Add(ctx, routeGUID, client.RouteDestination
 
 This is the kind of migration that a generated wrapper **cannot solve** — it requires understanding the V3 domain model. The recommended approach is to rewrite `ports/ports.go` using go-cfclient's `Routes` and `RouteDestinations` resources directly.
 
-> **TODO:** The V2 ports → V3 route destinations migration deserves deeper analysis. Key open questions: How do route destinations interact with internal routes (used by metric-registrar for metrics endpoint exposure)? Does the `cf create-route --internal` + destination model fully replace the V2 ports array for internal service-to-service communication?
+#### Deep Analysis: V2 Ports → V3 Route Destinations
+
+The V2 `ports` array on the app entity (`PUT /v2/apps/{guid} {"ports": [8080, 9090]}`) has **no direct equivalent in V3**. This is a fundamental architectural change, not a field rename:
+
+| Concept | V2 | V3 |
+|---|---|---|
+| Declare app can serve on a port | `PUT /v2/apps/{guid}` with `ports` array | No equivalent — not needed |
+| Route traffic to a specific port | Route mapping with `app_port` | Route destination with `port` field |
+| Default port | 8080 (buildpack) or Docker EXPOSE | Same defaults, but declared per-destination |
+| Read which ports are mapped | `GET /v2/route_mappings` | `GET /v3/routes/{route_guid}/destinations` |
+| Atomic read-modify-write | Single PUT on app entity | Per-route: discover routes → manage destinations per route |
+
+**What metric-registrar actually does with ports:**
+
+The `--internal-port` flag does **not** create CF internal routes (`apps.internal` domain). "Internal" here means "a port internal to the container" — the platform-side metrics scraper reaches the app on that port directly via the container overlay network IP, bypassing the gorouter entirely.
+
+The port lifecycle:
+1. **Register:** Read current `entity.ports` (e.g., `[8080]`), append the metrics port (e.g., `[8080, 2112]`), write back via `PUT /v2/apps/{guid}`
+2. **Unregister:** Read current ports, compute which ports are still needed by remaining registrations, write reduced array
+
+The V2 `ports` array served a dual purpose: it told Diego which ports to expose on the container *and* which ports could be targeted by route mappings. In V3, these concerns are split:
+
+- **Routable ports** are managed via route destinations (`POST /v3/routes/{guid}/destinations` with `port` field). go-cfclient supports this fully: `InsertDestinations()`, `ReplaceDestinations()`, `RemoveDestination()`.
+- **Non-routable container ports** (what the scraper needs) have no V3 API equivalent. The V2 `ports` array was the only way to tell Diego "expose port 2112 on the container network without routing it through gorouter."
+
+**Migration options for non-routable ports:**
+
+1. **Internal route + destination:** Create a route on an internal domain (`apps.internal`), then add a destination targeting the metrics port. The scraper would reach the app via `app-name.apps.internal:2112`. This works but changes the scraper's connectivity model — it must resolve the internal route instead of using the container IP directly.
+
+2. **Process health-check port:** If the metrics port is also the health-check port, the process configuration already exposes it. But metric-registrar uses a dedicated metrics port separate from the app's health check.
+
+3. **Sidecar process:** Declare the metrics endpoint as a sidecar process in the app manifest. This is architecturally clean but requires manifest changes rather than API calls.
+
+4. **Keep using `cf curl`:** Continue calling the V2 endpoints for port management until they are removed. This buys time but doesn't solve the problem.
+
+**Recommendation for metric-registrar:** Option 1 (internal route + destination) is the most viable V3 migration path. It requires changing the scraper's connectivity model from "container IP + port" to "internal route hostname + port," which is a platform-side change — not just a plugin change. This confirms that the port migration is a **cross-component redesign** requiring coordination between the plugin and the metric-registrar platform component.
+
+**Impact on the transitional migration approach:** The port migration cannot be handled by the V2Compat wrapper or the code generator. It is explicitly a "category 2: redesign" migration (see below) that requires human judgment and cross-component coordination. The generated wrapper approach correctly surfaces this as work the developer must handle manually.
 
 **Phase 2 result:**
 
