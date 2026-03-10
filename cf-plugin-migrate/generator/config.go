@@ -60,7 +60,10 @@ func (mc *MethodConfig) UnmarshalYAML(value *yaml.Node) error {
 func LoadConfig(path string) (*GenerateConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("reading config: %w", err)
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("config file not found: %s\n\nRun 'cf-plugin-migrate scan ./... > cf-plugin-migrate.yml' to generate one.", path)
+		}
+		return nil, fmt.Errorf("reading config %s: %w", path, err)
 	}
 
 	return ParseConfig(data)

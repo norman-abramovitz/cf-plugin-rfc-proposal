@@ -1,0 +1,8 @@
+schema_version: "1"
+package: command
+methods:
+  GetApp:
+    fields: [Name, Guid, Routes]
+    route_fields: [Host, Domain.Name, Port, Path]
+  GetApps:
+    fields: [Name, Guid]

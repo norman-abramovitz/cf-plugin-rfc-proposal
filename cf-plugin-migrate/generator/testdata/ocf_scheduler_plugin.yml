@@ -1,0 +1,7 @@
+schema_version: "1"
+package: main
+methods:
+  GetApp:
+    fields: [Guid, Name]
+  GetApps:
+    fields: [Guid, Name]

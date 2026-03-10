@@ -69,7 +69,10 @@
   - [x] Phase D: Medium domain methods (GetService, GetServices, GetOrg, GetSpace, GetOrgUsers, GetSpaceUsers)
   - [x] Phase E: Complex domain methods (GetApps, GetApp — dependency chains, per-item calls) — tested with OCF Scheduler against live CAPI V3 (v3.180.0): `cf create-job` resolved app via V3 `Applications.Single`
   - [x] Phase F: Scanner enhancement — detect all `CliCommand`/`CliCommandWithoutTerminalOutput` calls (command + args extraction), `cf curl` deep analysis (endpoint URL extraction, JSON unmarshal tracing, field access, V2→V3 endpoint mapping for 20 known endpoints). Validated against test_rpc_server_example, mysql-cli-plugin (14 calls), ocf-scheduler (0 calls).
-  - [ ] Phase G: Polish — golden file tests, CLI flags, error messages
+  - [x] Phase G: Polish — golden file tests, CLI flags, error messages
+    - [x] Golden file tests: 4 fixtures (session_only_plugin, getapp_guid_only_plugin, ocf_scheduler_plugin, metric_registrar_plugin) with -update flag for regeneration
+    - [x] CLI flags: Added `-h`/`--help`/`help` support for all subcommands, `-o` output flag for generate, proper `flag.FlagSet` parsing, usage examples
+    - [x] Error messages: Config-not-found suggests running scan, unknown command shows usage
 - [x] Document token lifecycle pattern (`config.TokenProvider()` for long-running plugins) — see [transitional RFC token lifecycle](rfc-draft-plugin-transitional-migration.md#token-lifecycle)
 - [x] Proof-of-concept: Analyze and walk through list-services migration (Tier 1: simple) — see [transitional RFC worked example](rfc-draft-plugin-transitional-migration.md#list-services-tier-1-simplest-domain-method-migration). Key finding: plugin is already 90% V3; demonstrates all three coupling patterns (V2 domain method, cf curl, CLI internal imports) in simplest form.
 - [x] Proof-of-concept: Analyze and walk through OCF Scheduler migration (Tier 2: moderate) — see [transitional RFC worked example](rfc-draft-plugin-transitional-migration.md#worked-example-ocf-scheduler-plugin)
