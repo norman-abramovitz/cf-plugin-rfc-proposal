@@ -312,12 +312,12 @@ Found CliCommand calls (legacy — not available in V3 plugin interface):
 Internal CLI package imports detected:
 
   code.cloudfoundry.org/cli/cf/trace
-    → Replace with: code.cloudfoundry.org/cf-plugin-helpers/cftrace
-    Functions used: NewLogger (api/apihelper.go:47)
+    → Replace with: trace "code.cloudfoundry.org/cf-plugin-helpers/cftrace"
+    Note: import alias preserves existing trace.X references
 
   code.cloudfoundry.org/cli/cf/configuration/confighelpers
-    → Replace with: code.cloudfoundry.org/cf-plugin-helpers/cfconfig
-    Functions used: DefaultFilePath (api/endpoint.go:23)
+    → Replace with: confighelpers "code.cloudfoundry.org/cf-plugin-helpers/cfconfig"
+    Note: import alias preserves existing confighelpers.X references
 ```
 
 #### How the YAML Maps V2 Fields to V3 API Calls
@@ -1175,14 +1175,14 @@ package cfconfig
 
 // DefaultFilePath returns the path to the CF CLI config file.
 // Checks $CF_HOME first, falls back to $HOME/.cf/config.json.
-func DefaultFilePath() string
+func DefaultFilePath() (string, error)
 
-// PluginRepoDir returns the path to the CF CLI plugin repo directory.
-// Checks $CF_HOME first, falls back to $HOME/.cf/plugins.
-func PluginRepoDir() string
+// PluginRepoDir is a function variable that returns the plugin repo directory.
+// Checks $CF_PLUGIN_HOME first, falls back to the CF home directory.
+var PluginRepoDir func() string
 ```
 
-Implementation: ~10 lines of stdlib (`os.Getenv`, `os.UserHomeDir`, `filepath.Join`).
+Implementation: ~30 lines of stdlib. Matches the original signatures exactly — `DefaultFilePath()` returns `(string, error)` and validates `$CF_HOME` exists; `PluginRepoDir` is a `var` (function variable), not a regular function, matching the original declaration in `confighelpers`.
 
 #### `cfformat` — replaces `cf/formatters` (1 plugin)
 
@@ -1297,19 +1297,21 @@ Implementation: ~100 lines. Tables via `text/tabwriter`, color via `fatih/color`
 
 #### Migration Example
 
-**app-autoscaler-cli-plugin** — 2 import path changes, zero code changes:
+**app-autoscaler-cli-plugin** — validated against upstream commit `641a1a8` (pre-V3 changes). 4 import lines changed across 4 files, zero code changes, all tests pass.
+
+Because the replacement package names differ from the originals (`cftrace` vs `trace`, `cfconfig` vs `confighelpers`), import aliases preserve all existing code references:
 
 ```go
-// Before (2 imports from CLI internals)
+// Before (imports from CLI internals)
 import (
     "code.cloudfoundry.org/cli/cf/trace"
     "code.cloudfoundry.org/cli/cf/configuration/confighelpers"
 )
 
-// After (2 import path changes, zero code changes)
+// After (import aliases — zero code changes, all trace.X and confighelpers.X references work)
 import (
-    "code.cloudfoundry.org/cf-plugin-helpers/cftrace"
-    "code.cloudfoundry.org/cf-plugin-helpers/cfconfig"
+    trace "code.cloudfoundry.org/cf-plugin-helpers/cftrace"
+    confighelpers "code.cloudfoundry.org/cf-plugin-helpers/cfconfig"
 )
 ```
 

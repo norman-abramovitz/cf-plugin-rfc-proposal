@@ -1,34 +1,51 @@
 package cfconfig
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 )
+
+func homeDir() (string, error) {
+	if cfHome := os.Getenv("CF_HOME"); cfHome != "" {
+		if _, err := os.Stat(cfHome); os.IsNotExist(err) {
+			return "", fmt.Errorf("Error locating CF_HOME folder '%s'", cfHome)
+		}
+		return cfHome, nil
+	}
+	return userHomeDir(), nil
+}
+
+func userHomeDir() string {
+	if runtime.GOOS == "windows" {
+		home := os.Getenv("HOMEDRIVE") + os.Getenv("HOMEPATH")
+		if home == "" {
+			home = os.Getenv("USERPROFILE")
+		}
+		return home
+	}
+	return os.Getenv("HOME")
+}
 
 // DefaultFilePath returns the path to the CF CLI config file.
 // Checks $CF_HOME first, falls back to $HOME/.cf/config.json.
 // This is a drop-in replacement for cf/configuration/confighelpers.DefaultFilePath().
-func DefaultFilePath() string {
-	if cfHome := os.Getenv("CF_HOME"); cfHome != "" {
-		return filepath.Join(cfHome, ".cf", "config.json")
-	}
-	home, err := os.UserHomeDir()
+func DefaultFilePath() (string, error) {
+	home, err := homeDir()
 	if err != nil {
-		return ""
+		return "", err
 	}
-	return filepath.Join(home, ".cf", "config.json")
+	return filepath.Join(home, ".cf", "config.json"), nil
 }
 
-// PluginRepoDir returns the path to the CF CLI plugin repo directory.
-// Checks $CF_HOME first, falls back to $HOME/.cf/plugins.
-// This is a drop-in replacement for cf/configuration/confighelpers.PluginRepoDir().
-func PluginRepoDir() string {
-	if cfHome := os.Getenv("CF_HOME"); cfHome != "" {
-		return filepath.Join(cfHome, ".cf", "plugins")
+// PluginRepoDir is a function variable that returns the plugin repo directory.
+// Checks $CF_PLUGIN_HOME first, falls back to the CF home directory.
+// This is a drop-in replacement for cf/configuration/confighelpers.PluginRepoDir.
+var PluginRepoDir = func() string {
+	if pluginHome := os.Getenv("CF_PLUGIN_HOME"); pluginHome != "" {
+		return pluginHome
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".cf", "plugins")
+	home, _ := homeDir()
+	return home
 }

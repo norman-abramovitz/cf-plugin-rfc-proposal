@@ -8,7 +8,10 @@ import (
 )
 
 func TestDefaultFilePath(t *testing.T) {
-	path := DefaultFilePath()
+	path, err := DefaultFilePath()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if path == "" {
 		t.Fatal("expected non-empty path")
 	}
@@ -18,39 +21,48 @@ func TestDefaultFilePath(t *testing.T) {
 }
 
 func TestDefaultFilePathWithCFHome(t *testing.T) {
-	t.Setenv("CF_HOME", "/tmp/test-cf-home")
-	path := DefaultFilePath()
-	want := filepath.Join("/tmp/test-cf-home", ".cf", "config.json")
+	dir := t.TempDir()
+	t.Setenv("CF_HOME", dir)
+	path, err := DefaultFilePath()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := filepath.Join(dir, ".cf", "config.json")
 	if path != want {
 		t.Errorf("expected %q, got %q", want, path)
+	}
+}
+
+func TestDefaultFilePathWithCFHomeNotExist(t *testing.T) {
+	t.Setenv("CF_HOME", "/nonexistent/path/that/should/not/exist")
+	_, err := DefaultFilePath()
+	if err == nil {
+		t.Fatal("expected error for nonexistent CF_HOME")
 	}
 }
 
 func TestPluginRepoDir(t *testing.T) {
+	t.Setenv("CF_PLUGIN_HOME", "")
 	path := PluginRepoDir()
 	if path == "" {
 		t.Fatal("expected non-empty path")
 	}
-	if !strings.HasSuffix(path, filepath.Join(".cf", "plugins")) {
-		t.Errorf("expected path ending in .cf/plugins, got %q", path)
-	}
 }
 
-func TestPluginRepoDirWithCFHome(t *testing.T) {
-	t.Setenv("CF_HOME", "/tmp/test-cf-home")
+func TestPluginRepoDirWithCFPluginHome(t *testing.T) {
+	t.Setenv("CF_PLUGIN_HOME", "/tmp/test-plugin-home")
 	path := PluginRepoDir()
-	want := filepath.Join("/tmp/test-cf-home", ".cf", "plugins")
-	if path != want {
-		t.Errorf("expected %q, got %q", want, path)
+	if path != "/tmp/test-plugin-home" {
+		t.Errorf("expected /tmp/test-plugin-home, got %q", path)
 	}
 }
 
 func TestDefaultFilePathNoHome(t *testing.T) {
-	// Unset both CF_HOME and HOME to test fallback
 	t.Setenv("CF_HOME", "")
 	orig := os.Getenv("HOME")
 	t.Setenv("HOME", "")
 	defer os.Setenv("HOME", orig)
-	// Should not panic — returns empty string
-	_ = DefaultFilePath()
+	// Should not panic — returns empty path
+	path, _ := DefaultFilePath()
+	_ = path
 }
