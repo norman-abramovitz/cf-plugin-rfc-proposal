@@ -4,58 +4,82 @@
 - Start Date: 2026-03-01
 - Author(s): @norman-abramovitz
 - Status: Draft
-- Related RFC: [CLI Plugin Interface V3](rfc-draft-cli-plugin-interface-v3.md)
 - Tracking Issue: [cloudfoundry/cli#3621](https://github.com/cloudfoundry/cli/issues/3621)
 
 ## Summary
 
-This document describes a **guest-side transitional migration approach** that allows existing Go plugins to begin migrating from V2 domain methods to direct CAPI V3 access **today**, without waiting for the V3 plugin interface or any host (CF CLI) changes. The approach uses a companion wrapper library that sits entirely on the guest side, wraps the existing `plugin.CliConnection`, and provides a pre-configured go-cfclient V3 client.
+**Key terms used throughout this document:**
+- **Host** — the CF CLI process that launches and manages plugins
+- **Guest** — the plugin process launched by the host
+- **V2 domain methods** — the 10 methods on `plugin.CliConnection` that return V2-shaped data (`GetApp`, `GetApps`, `GetService`, `GetServices`, `GetOrg`, `GetOrgs`, `GetSpace`, `GetSpaces`, `GetOrgUsers`, `GetSpaceUsers`)
+- **Context methods** — the 11 methods on `plugin.CliConnection` that return session and authentication data (`AccessToken`, `ApiEndpoint`, `GetCurrentOrg`, `GetCurrentSpace`, `Username`, `IsLoggedIn`, `HasOrganization`, `HasSpace`, `IsSSLDisabled`, `HasAPIEndpoint`, `ApiVersion`)
+- **CAPI V3** — Cloud Controller API version 3, the CF platform's REST API
+- **go-cfclient** — the official Go client library for CAPI V3 (`github.com/cloudfoundry/go-cfclient/v3`)
+- **`plugin.CliConnection`** — the Go interface that the host provides to guests, carrying both V2 domain methods and context methods
+
+This document describes a **guest-side (plugin-side) transitional migration approach** that allows existing Go plugins to begin migrating from V2 domain methods to direct CAPI V3 access **today**, without waiting for any host changes.
+
+The approach has two key properties:
+
+1. **No host changes required.** A generated wrapper library sits entirely on the guest side, wraps the existing `plugin.CliConnection`, and provides a pre-configured go-cfclient V3 client. It works with any existing CF CLI version (v7, v8, v9).
+
+2. **Host-guest separation.** By moving domain operations to the guest side, the host CLI is freed to remove its V2 domain method implementation code (`GetApp`, `GetApps`, `GetService`, etc.) on its own timeline. The guest no longer depends on the host for V2 data — it fetches directly from CAPI V3. This clean separation benefits both sides: plugin developers migrate at their own pace, and CLI maintainers can simplify the host codebase without coordinating with every plugin author.
+
+The migration is supported by **`cf-plugin-migrate`**, a companion tool that scans plugin source code, detects V2 usage, and generates minimal V3-backed wrapper functions. For session-only plugins (those that use only context methods like `AccessToken`, `GetCurrentOrg`, etc.), the migration requires **zero code changes** — just drop in the generated file. For plugins that call V2 domain methods, the migration requires **one new dependency** (go-cfclient/v3) and optionally **one line of code** changed.
 
 This approach is validated by the [Rabobank `cf-plugins`](https://github.com/rabobank/cf-plugins) library, which has been in production use since 2025 (see [plugin survey case study](plugin-survey.md#case-study-rabobank-guest-side-transitional-wrapper)).
 
-## Motivation
+## Problem
 
-### Why Migrate Now?
+### CAPI V2 Is Reaching End of Life
 
-1. **CAPI V2 is reaching end of life.** Plugins that depend on V2-shaped data from the host's domain methods (`GetApp`, `GetApps`, `GetService`, etc.) will stop working when V2 endpoints are removed.
+Plugins that depend on V2-shaped data from the host's domain methods (`GetApp`, `GetApps`, `GetService`, etc.) will stop working when V2 endpoints are removed. The current plugin interface returns `plugin_models.*` types that mirror V2 response structures — these types cannot represent V3 concepts like multiple process types, sidecars, rolling deployments, service credential bindings, or metadata labels.
 
-2. **V2 domain methods are lossy.** The V2-shaped `plugin_models.*` types cannot represent V3 concepts: multiple process types, sidecars, rolling deployments, service credential bindings, metadata labels, etc. Plugins reimplementing V2 methods via V3 (as Rabobank demonstrated) lose information and require many more API calls.
+### The Host Carries Legacy Code for Plugin Support
 
-3. **The V3 plugin interface is not yet available.** The [Plugin Interface V3 RFC](rfc-draft-cli-plugin-interface-v3.md) defines a new interface with embedded metadata, JSON-RPC, and polyglot support — but implementation requires host changes across multiple phases (Q3 2026 – Q3 2027). Plugin developers should not wait.
+The CF CLI host currently implements 10 V2 domain methods on behalf of plugins via RPC. Each method involves:
+- An RPC handler in `plugin/rpc/cli_rpc_server.go`
+- V2-shaped response types in `plugin/models/`
+- Config-derived accessors and state management
 
-4. **No host changes required.** A guest-side wrapper works with any existing CF CLI version (v7, v8, v9) because it only uses the standard `plugin.CliConnection` interface and `plugin.Start()` entry point.
+This code exists solely to serve the guest-side plugin interface. Once plugins fetch their own data via CAPI V3, the host can remove this entire subsystem — reducing maintenance burden, simplifying the CLI codebase, and eliminating a class of RPC-related bugs.
 
-### Who Should Use This Approach?
+### CliCommand Is a Fragile Escape Hatch
 
-- Plugin developers whose plugins call V2 domain methods (`GetApp`, `GetApps`, `GetService`, `GetServices`, `GetOrg`, `GetOrgs`, `GetSpaces`)
+Many plugins use `CliCommand` or `CliCommandWithoutTerminalOutput` to run arbitrary CF CLI commands, including `cf curl` for direct CAPI access. These calls:
+- Parse CLI text output, which is fragile across CLI versions
+- Cannot be statically analyzed by the host for deprecation planning
+- Mix workflow orchestration (e.g., `push`, `bind-service`) with data access (e.g., `curl /v2/apps`)
+
+A scan of 18 actively maintained plugins found `CliCommand` usage across 14 plugins, with patterns ranging from simple `cf apps` to complex `cf curl` with JSON parsing and pagination.
+
+### Who Should Migrate
+
+- Plugin developers whose plugins call V2 domain methods (`GetApp`, `GetApps`, `GetService`, `GetServices`, `GetOrg`, `GetOrgs`, `GetSpaces`, `GetOrgUsers`, `GetSpaceUsers`)
+- Plugin developers who use `CliCommand`/`CliCommandWithoutTerminalOutput` for `cf curl` against CAPI endpoints
 - Plugin developers who want to access CAPI V3 directly but currently bootstrap go-cfclient or custom HTTP clients manually
-- Plugin developers who want to prepare for the V3 interface by adopting the companion package pattern now
 
-## Architecture
+## Proposal
 
-### Terminology
+### Architecture
 
-Per the [V3 RFC terminology](rfc-draft-cli-plugin-interface-v3.md#terminology): **Host** is the CF CLI process, **Guest** is the plugin process.
-
-### Design
-
-The transitional approach introduces a thin wrapper library on the guest side:
+The transitional approach introduces a thin wrapper on the guest side:
 
 ```
 ┌─────────────────────────────────────────────────────┐
 │                  Host (CF CLI)                       │
 │                                                     │
-│  Existing plugin.CliConnection via net/rpc + gob    │
+│  Existing plugin.CliConnection via gob/net-rpc       │
 │  (no changes required)                              │
 └────────────────────────┬────────────────────────────┘
                          │
-                         │  Existing gob/net-rpc protocol
+                         │  Existing gob/net-rpc protocol (Go's built-in binary RPC)
                          │
 ┌────────────────────────▼────────────────────────────┐
 │                  Guest (Plugin)                      │
 │                                                     │
 │  ┌───────────────────────────────────────────────┐  │
-│  │  Transitional Wrapper                         │  │
+│  │  V2Compat Wrapper (generated)                 │  │
 │  │                                               │  │
 │  │  ┌─────────────────┐  ┌───────────────────┐  │  │
 │  │  │ Pass-through     │  │ go-cfclient V3    │  │  │
@@ -72,127 +96,295 @@ The transitional approach introduces a thin wrapper library on the guest side:
 The wrapper:
 - **Embeds** `plugin.CliConnection` — all 16 context methods pass through unchanged
 - **Constructs** a go-cfclient V3 `*client.Client` from `AccessToken()`, `ApiEndpoint()`, and `IsSSLDisabled()`
-- **Exposes** `CfClient()` so the plugin can make direct V3 API calls
-- **Calls** `plugin.Start()` internally — the standard host registration mechanism
+- **Reimplements** only the V2 domain methods the plugin actually uses, backed by the minimum V3 API calls required
+- **Satisfies** `plugin.CliConnection` — existing code that accepts the connection interface works without changes
 
-## Migration Guide
+**What changes vs. what doesn't:**
 
-### Step 1: Add the Companion Package
+| Component | Changes? | Details |
+|---|---|---|
+| `plugin.Start()` entry point | No | Standard host registration, unchanged |
+| Context methods (`AccessToken`, `GetCurrentOrg`, etc.) | No | Pass through to host via RPC |
+| V2 domain methods (`GetApp`, `GetApps`, etc.) | **Yes** | Reimplemented via V3 on guest side |
+| `CliCommand` / `CliCommandWithoutTerminalOutput` | **Flagged** | Should migrate to go-cfclient; workflow commands can stay |
+| Host CLI codebase | No | No host changes required |
 
-The recommended companion package is `code.cloudfoundry.org/cli-plugin-helpers/cfclient` (proposed in the V3 RFC). Until that package is published, plugin developers can use the pattern directly.
+### Host-Guest Separation Enables CLI Simplification
 
-Add go-cfclient to your plugin's dependencies:
+A key benefit of this migration is that it **decouples the guest's data needs from the host's implementation**. Today, when a plugin calls `conn.GetApp("myapp")`, the host must:
+
+1. Receive the RPC call
+2. Query CAPI (currently V2) on behalf of the plugin
+3. Populate a `plugin_models.GetAppModel` struct
+4. Serialize and return it via gob/net-rpc
+
+After migration, the guest calls CAPI V3 directly. The host's role shrinks to providing authentication context (`AccessToken`, `ApiEndpoint`, `IsSSLDisabled`) and session state (`GetCurrentOrg`, `GetCurrentSpace`). These are simple, stable methods unlikely to change.
+
+This means the CLI team can:
+- Remove the V2 domain method RPC handlers from `plugin/rpc/cli_rpc_server.go`
+- Remove the `plugin_models.*` types that mirror V2 response structures
+- Simplify the plugin launch code in `plugin/rpc/run_plugin.go`
+- Reduce the surface area for RPC-related bugs
+
+The migration happens **without coordination** — each plugin developer migrates independently, and the CLI team removes host-side code when usage drops below their threshold.
+
+**Build-time dependency remains.** The runtime decoupling described above does not eliminate the plugin's compile-time dependency on the CLI's Go packages. Plugins still import `code.cloudfoundry.org/cli/plugin` (for the `CliConnection` interface and `plugin.Start()`) and `code.cloudfoundry.org/cli/plugin/models` (for the V2 model types the generated wrappers return). These are the *intended* public plugin contract — not internal packages — but they still couple the guest's build to the host's repository.
+
+#### Achieving Full Build-Time Separation: Plugin SDK
+
+> **TODO:** The following analysis describes the planned approach for full build-time decoupling. This will be implemented before the RFC approval process.
+
+The build-time coupling can be eliminated by publishing a **plugin SDK** — a standalone Go module owned by the plugin side — containing copies of the host's plugin interface types:
+
+- `plugin.Plugin` interface, `plugin.CliConnection` interface
+- `plugin.Start()` function (the plugin-side RPC client setup)
+- `plugin.PluginMetadata`, `plugin.Command`, `plugin.Usage`, `plugin.VersionType` types
+- `plugin/models/*` — all V2 model types (`GetAppModel`, `GetAppsModel`, etc.)
+
+**Why copying works:** The plugin and CLI are separate processes communicating via gob/net-rpc over TCP. The contract between them is the **wire format** — gob encodes structs by field name and type, not by Go package path. As long as both sides define identical struct layouts, gob serialization works correctly across the process boundary regardless of which Go module the types live in.
+
+**Ownership model:** Today the CLI owns the interface definition and plugins are consumers. The SDK flips this — plugins own the interface, and the CLI implements the wire protocol against it. This is appropriate because the plugin interface is a *contract boundary*, not an internal implementation detail.
+
+**Migration sequence:**
+
+| Step | Who | What Changes |
+|---|---|---|
+| 1. Publish plugin SDK | Plugin side | SDK published with copies of current `plugin/` and `plugin/models/` types |
+| 2. Plugins update imports | Plugin developers | Import paths change from `cli/plugin` to SDK — no logic changes |
+| 3. `cf-plugin-migrate` generates SDK imports | Tool | Generated wrappers import SDK types instead of CLI types |
+| 4. CLI keeps its own copy | CLI team | Nothing changes — no coordination needed |
+| 5. CLI removes its copy (when ready) | CLI team | CLI imports the plugin SDK for the types it still needs (RPC server, gob encoding) |
+| 6. V3 interface ships | Both | New V3 contract replaces V2 types; V2 SDK becomes legacy |
+
+Steps 1–3 require no CLI team involvement. Steps 4–5 happen on the CLI team's timeline. The plugin side is fully decoupled after step 2.
+
+**Risk:** If either side changes a struct field without the other matching, the gob wire format breaks. This risk is low — these types have been frozen for years, and the explicit plan is to not change them until the V3 plugin interface is defined.
+
+**What this buys:** After step 2, plugins no longer import the CLI repository at all. The `go.mod` dependency on `code.cloudfoundry.org/cli` disappears. Plugins build faster, have fewer transitive dependencies, and are immune to CLI module restructuring.
+
+### The Scanner: Automated V2 Usage Audit
+
+#### What It Does
+
+`cf-plugin-migrate scan` is an AST-based audit tool that analyzes a plugin's Go source code and produces a complete inventory of V2 interface usage. It answers the question every plugin developer and migration planner needs answered: **what exactly does this plugin depend on from the V2 interface?**
+
+The scanner detects three categories of usage:
+
+1. **V2 domain method calls** — `GetApp`, `GetApps`, `GetService`, `GetServices`, `GetOrg`, `GetOrgs`, `GetSpace`, `GetSpaces`, `GetOrgUsers`, `GetSpaceUsers`. For each call, it traces which fields of the returned model are actually accessed (e.g., only `Guid` and `Name` out of 20+ available fields on `GetAppModel`).
+
+2. **`CliCommand` / `CliCommandWithoutTerminalOutput` calls** — Every call is detected with its command name and arguments. For `cf curl` calls, the scanner performs deep analysis: endpoint URL extraction, `json.Unmarshal` tracing, target struct type detection, field access tracking, and V2→V3 endpoint mapping.
+
+3. **Session/context method calls** — `AccessToken`, `ApiEndpoint`, `GetCurrentOrg`, `GetCurrentSpace`, etc. These pass through unchanged and require no migration.
+
+**Output:**
+- **Human-readable summary** (stderr) — for quick review
+- **YAML configuration** (stdout) — `cf-plugin-migrate.yml`, ready for the code generator
+
+```bash
+$ cf-plugin-migrate scan ./...
+Found V2 domain method calls:
+
+  commands/create-job.go:42  GetApp  → fields: Guid
+  core/util.go:15            GetApps → fields: Guid, Name
+    V3 API calls: Applications.Single, Applications.ListAll
+
+Found CliCommand calls (legacy — not available in V3 plugin interface):
+
+  client.go:92  CliCommandWithoutTerminalOutput("curl", "v2/apps")
+    → V3 equivalent: /v3/apps (V2 entity/metadata envelope → V3 flat resources)
+    → Unmarshalled into: apps (AppsModel)
+    → Fields used: NextURL, Resources
+```
+
+#### How the YAML Maps V2 Fields to V3 API Calls
+
+The key insight is that most plugins use only a fraction of the fields available on V2 model types. The YAML captures exactly which fields are used, and the generator maps each field to the minimum V3 API call required:
+
+```yaml
+# cf-plugin-migrate.yml — generated by scan, consumed by generate
+schema_version: 1
+package: main
+methods:
+  GetApp:
+    fields: [Guid, Name]        # ← only 2 of 20+ fields used
+  GetApps:
+    fields: [Guid, Name, State] # ← only 3 of 8 fields used
+```
+
+Each field belongs to a **dependency group** — a set of V3 API calls. The generator includes a group only when at least one field from that group is requested:
+
+| Fields Requested | V3 API Call | Call Count |
+|---|---|---|
+| `Guid`, `Name`, `State`, `SpaceGuid` | `Applications.Single()` | 1 |
+| + `Routes` | + `Routes.ListForApp(include=domain)` | 2 |
+| + `Command`, `Memory`, `InstanceCount` | + `Processes.ListForApp()` | 3 |
+| + `RunningInstances` | + `Processes.GetStats()` | 4 |
+| + `BuildpackUrl` | + `Droplets.GetCurrentForApp()` | 5 |
+
+If a plugin only uses `Guid` and `Name`, the generated code makes **1 API call**. Compare this to the Rabobank library which always makes 10+ calls to populate every field regardless of usage.
+
+#### Scanner Limitations (and Why They Don't Matter)
+
+The scanner uses static AST analysis without full type resolution. This means there are patterns it cannot trace:
+
+| Pattern | Example | Scanner Handles? |
+|---|---|---|
+| Direct field access | `app.Guid`, `app.Routes[0].Host` | **Yes** |
+| Range iteration | `for _, s := range services { s.Name }` | **Yes** |
+| Indexed access | `app.Routes[i].Domain.Name` | **Yes** |
+| Passed to helper function | `helper(app)` then `app.Guid` in helper | **Flagged** — cross-function |
+| Stored in struct field | `ctx.App = app` then `ctx.App.Guid` | **Flagged** — alias tracking |
+| Reflection / interface cast | `reflect.ValueOf(app).FieldByName(...)` | **No** |
+
+**Why the limitations don't matter:**
+
+1. **Conservative is correct.** The scanner flags ambiguous cases for manual review rather than silently omitting them. A developer reviewing the YAML can add any missed fields in seconds.
+
+2. **The common case is simple.** Analysis of 18 actively maintained plugins shows that the vast majority of field access happens directly at or near the call site. The OCF Scheduler, cf-targets-plugin, and Rabobank consumers all follow this pattern.
+
+3. **The YAML is editable.** The scan output is a starting point, not a final answer. Developers can add fields, remove false positives, or adjust sub-field specifications before generating code.
+
+4. **Reflection-based access doesn't exist in practice.** No surveyed plugin uses reflection to access V2 model fields.
+
+### Migration Guide
+
+#### Path A: Generated V2Compat Wrapper (Recommended)
+
+This is the recommended approach for most plugins. The generated wrapper satisfies the `plugin.CliConnection` interface, so existing plugin code works without modification.
+
+**Step 1: Scan**
+
+```bash
+cd your-plugin/
+go run cf-plugin-migrate scan ./...  > cf-plugin-migrate.yml
+```
+
+Review the YAML output. The scanner auto-detects V2 domain method calls and the specific fields your plugin accesses.
+
+**Step 2: Generate**
+
+```bash
+go run cf-plugin-migrate generate
+```
+
+This reads `cf-plugin-migrate.yml` and produces `v2compat_generated.go` — a single file containing:
+- A `V2Compat` struct that embeds `plugin.CliConnection`
+- A `NewV2Compat(conn)` constructor that builds a go-cfclient V3 client from the connection's credentials
+- Reimplementations of only the V2 domain methods your plugin uses, making only the V3 API calls required for the fields you access
+- Pass-through implementations for all other methods
+
+**Step 3: Add the dependency** (domain method plugins only)
 
 ```bash
 go get github.com/cloudfoundry/go-cfclient/v3
 ```
 
-**Version note:** go-cfclient v3 is still in alpha (v3.0.0-alpha.20 as of March 2026). See [go-cfclient V3 Version Guidance](#go-cfclient-v3-version-guidance) for minimum version recommendations and stability considerations.
+Session-only plugins (those that use only context methods) need no new dependency — the generated file contains only pass-through methods.
 
-### Step 2: Create a Client Helper
+**Step 4: Drop in and build**
 
-Add a helper function that constructs a go-cfclient V3 client from the existing plugin connection:
+For **session-only plugins** — you're done. The generated file compiles alongside your existing code with zero changes. Example: cf-targets-plugin required zero code changes.
+
+For **domain method plugins** — you have two options for wiring the wrapper:
+
+**Option A: Shadow the connection parameter (one line)**
 
 ```go
-package main
-
-import (
-    "code.cloudfoundry.org/cli/plugin"
-    "github.com/cloudfoundry/go-cfclient/v3/client"
-    "github.com/cloudfoundry/go-cfclient/v3/config"
-)
-
-func newCfClient(conn plugin.CliConnection) (*client.Client, error) {
-    endpoint, err := conn.ApiEndpoint()
+func (p *MyPlugin) Run(cliConnection plugin.CliConnection, args []string) {
+    cliConnection, err := NewV2Compat(cliConnection) // shadow the parameter
     if err != nil {
-        return nil, err
+        fmt.Println(err)
+        return
     }
+    // All existing code works unchanged — cliConnection.GetApp() now uses V3
+    app, err := cliConnection.GetApp("myapp")
+    // ...
+}
+```
 
-    token, err := conn.AccessToken()
+**Option B: Explicit variable (more visible)**
+
+```go
+func (p *MyPlugin) Run(conn plugin.CliConnection, args []string) {
+    compat, err := NewV2Compat(conn)
     if err != nil {
-        return nil, err
+        fmt.Println(err)
+        return
     }
+    // Pass compat wherever the plugin expects plugin.CliConnection
+    app, err := compat.GetApp("myapp")
+    // ...
+}
+```
 
-    skipSSL, err := conn.IsSSLDisabled()
+Both options work because `*V2Compat` satisfies `plugin.CliConnection`. The plugin developer chooses based on their preference for explicitness.
+
+**What the generated code looks like:**
+
+For a plugin that uses only `GetApp` with fields `[Guid, Name]`:
+
+```go
+// GENERATED by cf-plugin-migrate — do not edit
+func (c *V2Compat) GetApp(name string) (plugin_models.GetAppModel, error) {
+    var model plugin_models.GetAppModel
+    space, err := c.GetCurrentSpace()
     if err != nil {
-        return nil, err
+        return model, err
     }
+    app, err := c.cfClient.Applications.Single(context.Background(),
+        &client.AppListOptions{
+            Names:      client.Filter{Values: []string{name}},
+            SpaceGUIDs: client.Filter{Values: []string{space.Guid}},
+        })
+    if err != nil {
+        return model, err
+    }
+    model.Guid = app.GUID
+    model.Name = app.Name
+    return model, nil
+}
+```
 
-    cfg, err := config.New(endpoint,
+One V3 API call. Two fields populated. All other fields remain zero-valued. The generated comment documents exactly which fields are populated and how many API calls are made.
+
+#### Path B: Direct V3 Access (For New Development)
+
+For plugins starting fresh or developers who want to use V3-native types directly, bypass the V2 compatibility wrapper entirely:
+
+```go
+func (p *MyPlugin) Run(conn plugin.CliConnection, args []string) {
+    // Construct a go-cfclient V3 client from the connection's credentials
+    endpoint, _ := conn.ApiEndpoint()
+    token, _ := conn.AccessToken()
+    skipSSL, _ := conn.IsSSLDisabled()
+
+    cfg, _ := config.New(endpoint,
         config.Token(token),
         config.SkipTLSValidation(skipSSL),
     )
-    if err != nil {
-        return nil, err
-    }
+    cfClient, _ := client.New(cfg)
 
-    return client.New(cfg)
-}
-```
-
-**Note:** The `config.Token()` function in go-cfclient handles the `"bearer "` prefix internally. Do not strip the prefix manually.
-
-### Step 3: Replace V2 Domain Method Calls with Direct V3 Access
-
-**Before — using V2 domain method from the host:**
-
-```go
-func (p *MyPlugin) Run(conn plugin.CliConnection, args []string) {
-    // V2-shaped response from host — limited fields, single process model
-    app, err := conn.GetApp("my-app")
-    if err != nil {
-        fmt.Println(err)
-        return
-    }
-    fmt.Printf("App: %s (%s)\n", app.Name, app.Guid)
-    fmt.Printf("State: %s, Instances: %d\n", app.State, app.InstanceCount)
-}
-```
-
-**After — using go-cfclient V3 directly:**
-
-```go
-func (p *MyPlugin) Run(conn plugin.CliConnection, args []string) {
-    cfClient, err := newCfClient(conn)
-    if err != nil {
-        fmt.Println(err)
-        return
-    }
-
-    space, err := conn.GetCurrentSpace()
-    if err != nil {
-        fmt.Println(err)
-        return
-    }
-
-    // V3-native response — full app model with metadata, lifecycle, relationships
-    app, err := cfClient.Applications.Single(context.Background(),
+    // Use V3-native types — full model with metadata, lifecycle, relationships
+    app, _ := cfClient.Applications.Single(context.Background(),
         &client.AppListOptions{
-            Names:      client.Filter{Values: []string{"my-app"}},
-            SpaceGUIDs: client.Filter{Values: []string{space.Guid}},
-        },
-    )
-    if err != nil {
-        fmt.Println(err)
-        return
-    }
+            Names: client.Filter{Values: []string{"my-app"}},
+        })
     fmt.Printf("App: %s (%s)\n", app.Name, app.GUID)
-    fmt.Printf("State: %s\n", app.State)
 
     // V3 gives access to processes, sidecars, metadata — not available via V2
-    processes, _, err := cfClient.Processes.ListForApp(context.Background(), app.GUID, nil)
-    if err == nil {
-        for _, proc := range processes {
-            fmt.Printf("  Process: %s, Instances: %d, Memory: %dMB\n",
-                proc.Type, proc.Instances, proc.MemoryInMB)
-        }
+    processes, _, _ := cfClient.Processes.ListForApp(context.Background(), app.GUID, nil)
+    for _, proc := range processes {
+        fmt.Printf("  Process: %s, Instances: %d\n", proc.Type, proc.Instances)
     }
 }
 ```
 
-### Step 4: Remove V2 Domain Method Usage Incrementally
+**When to choose Path B:**
+- New plugin development
+- Plugins that need V3-only concepts (multiple process types, sidecars, metadata labels)
+- Developers comfortable rewriting call sites
 
-Migration does not need to happen all at once. A plugin can replace one V2 method call at a time:
+**V2 to V3 method mapping** (for manual migration):
 
 | V2 Method | V3 Replacement (go-cfclient) |
 |---|---|
@@ -204,193 +396,55 @@ Migration does not need to happen all at once. A plugin can replace one V2 metho
 | `conn.GetOrgs()` | `cfClient.Organizations.ListAll(ctx, nil)` |
 | `conn.GetSpaces()` | `cfClient.Spaces.ListAll(ctx, &client.SpaceListOptions{OrganizationGUIDs: ...})` |
 
-Context methods (`AccessToken`, `ApiEndpoint`, `GetCurrentOrg`, `GetCurrentSpace`, `Username`, `IsLoggedIn`, `HasOrganization`, `HasSpace`, `IsSSLDisabled`, `HasAPIEndpoint`, `ApiVersion`) continue to use the existing `plugin.CliConnection` — these are the core contract methods that the V3 RFC preserves.
+Context methods (`AccessToken`, `ApiEndpoint`, `GetCurrentOrg`, `GetCurrentSpace`, `Username`, `IsLoggedIn`, `HasOrganization`, `HasSpace`, `IsSSLDisabled`, `HasAPIEndpoint`, `ApiVersion`) continue to use the existing `plugin.CliConnection` — these are the core contract methods that any future plugin interface preserves.
 
-### Alternative: Generated V2 Compatibility Wrappers
+#### CliCommand / cf curl Migration
 
-For plugins with extensive V2 domain method usage, rewriting every call site at once may not be practical. An alternative approach generates **minimal V2-compatible wrapper functions** that return the existing `plugin_models.*` types but only populate the fields the plugin actually uses, backed by the minimum V3 API calls required.
+The scanner detects all `CliCommand` and `CliCommandWithoutTerminalOutput` calls and categorizes them:
 
-#### How It Works
-
-The plugin developer declares which V2 methods they call and which fields they use:
-
-```yaml
-# cf-plugin-migrate.yml
-methods:
-  GetApp:
-    fields: [Name, Guid, State, Routes]
-  GetApps:
-    fields: [Name, Guid, State]
-  GetService:
-    fields: [Name, Guid, ServicePlan]
-```
-
-A code generator reads this configuration and produces tailored wrapper functions:
+**`cf curl` calls** — SHOULD migrate to go-cfclient or direct HTTP. The scanner provides V2→V3 endpoint mapping for 20 known V2 API paths:
 
 ```go
-// GENERATED by cf-plugin-migrate — do not edit
-// GetApp populates: Name, Guid, State, Routes
-// V3 API calls: Applications.Single, Routes.ListForApp (2 calls)
-func getApp(cfClient *client.Client, spaceGUID string, name string) (plugin_models.GetAppModel, error) {
-    var model plugin_models.GetAppModel
+// Before:
+output, _ := conn.CliCommandWithoutTerminalOutput("curl", "/v2/apps?q=name:myapp")
+// Parse JSON from output[0]
 
-    app, err := cfClient.Applications.Single(context.Background(),
-        &client.AppListOptions{
-            Names:      client.Filter{Values: []string{name}},
-            SpaceGUIDs: client.Filter{Values: []string{spaceGUID}},
-        })
-    if err != nil {
-        return model, err
-    }
-
-    model.Name = app.Name
-    model.Guid = app.GUID
-    model.State = string(app.State)
-
-    // Routes — requested by developer
-    routes, _, err := cfClient.Routes.ListForApp(context.Background(), app.GUID, nil)
-    if err == nil {
-        for _, r := range routes {
-            model.Routes = append(model.Routes, plugin_models.GetApp_RouteSummary{
-                Guid: r.GUID,
-                Host: r.Host,
-            })
-        }
-    }
-
-    return model, nil
-}
+// After:
+apps, _ := cfClient.Applications.ListAll(ctx,
+    &client.AppListOptions{Names: client.Filter{Values: []string{"myapp"}}})
 ```
 
-Fields not listed in the configuration remain zero-valued. The generated code documents exactly which V3 API calls it makes, making the cost transparent.
+**Workflow commands** (`push`, `bind-service`, `restage`, `delete`) — MAY continue to use `CliCommand` during the transition. These are multi-step workflow operations managed by the CLI. They can be replaced with go-cfclient calls as a future optimization, but they work correctly as-is and do not depend on V2 endpoints.
 
-#### Field-to-API-Call Mapping
-
-The generator uses a field dependency map to determine the minimum V3 calls needed. This summary shows the incremental cost for `GetApp` — the most complex model. See [Complete V2→V3 Field Mapping Reference](#complete-v2v3-field-mapping-reference) for all models.
-
-| V2 Fields Requested | V3 API Calls Required | Call Count |
+| CLI Command | Can migrate to go-cfclient? | Priority |
 |---|---|---|
-| `Name`, `Guid`, `State`, `SpaceGuid` | `Applications.Single()` | 1 |
-| + `Routes` | + `Routes.ListForApp()` | 2 |
-| + `Command`, `Memory`, `DiskQuota`, `InstanceCount` | + `Processes.ListForApp()` + `Processes.Get()` | 3–4 |
-| + `RunningInstances`, `Instances` | + `Processes.GetStats()` | 4–5 |
-| + `BuildpackUrl`, `PackageState` | + `Droplets.GetCurrentForApp()` | 5–6 |
-| + `Stack` | + `Stacks.Single()` | 6–7 |
-| + `EnvironmentVars` | + `Applications.GetEnvironmentVariables()` | 7–8 |
-| + `Services` | + `ServiceCredentialBindings.ListIncludeServiceInstances()` | 8–9 |
-| + `PackageUpdatedAt` | + `Packages.ListForAppAll()` | 9–10 |
+| `create-user-provided-service` | Yes: `cfClient.ServiceInstances.CreateUserProvided()` | Low — CLI handles it fine |
+| `bind-service` | Yes: `cfClient.ServiceCredentialBindings.Create()` | Low |
+| `unbind-service` | Yes: `cfClient.ServiceCredentialBindings.Delete()` | Low |
+| `delete-service` | Yes: `cfClient.ServiceInstances.Delete()` | Low |
 
-Compare this to Rabobank's approach which always makes 10 V3 API calls (plus 1 host RPC call for `GetCurrentSpace()`) to populate every field, regardless of what the plugin uses.
+#### Worked Examples
 
-The generator also leverages CAPI V3 `include` and `fields` parameters to collapse multiple calls into one. For example, `GetService` drops from 3 calls (Rabobank) to **1 call** using `fields[service_plan]` and `fields[service_plan.service_offering]`. See [Generator Optimization Summary](#generator-optimization-summary) for the full comparison.
+##### cf-targets-plugin (Session-Only: Zero Code Changes)
 
-#### Automated Audit: `cf-plugin-migrate scan`
+The cf-targets-plugin uses only context methods (`GetCurrentOrg`, `GetCurrentSpace`, `HasOrganization`, `HasSpace`). No V2 domain methods, no `CliCommand` calls.
 
-Writing the YAML configuration by hand requires tracing every V2 domain method call and every field access — the same analysis we performed manually for the [OCF Scheduler](#worked-example-ocf-scheduler-plugin) and [metric-registrar](#worked-example-metric-registrar-plugin-complex-migration) worked examples. A `scan` subcommand automates this using Go's `go/ast` package.
+**Migration:** Run `cf-plugin-migrate scan` → generates a session-only V2Compat with pure pass-through methods. Drop in the file, build, install. **Zero lines of plugin code changed.**
 
-**Usage:**
+##### OCF Scheduler (Domain Methods: One Dependency + One Line)
 
-```bash
-cf-plugin-migrate scan ./...          # → produces cf-plugin-migrate.yml
-cf-plugin-migrate generate            # → produces v2compat_generated.go
-```
+The [OCF Scheduler plugin](https://github.com/cloudfoundry-community/ocf-scheduler-cf-plugin) uses `GetApp` (for `.Guid` only) and `GetApps` (for `.Guid`, `.Name`). No other fields are accessed — not `State`, `Routes`, `Memory`, `Instances`, or any other model attribute. The plugin uses V2 model methods purely as a name/GUID mapping layer.
 
-**What the scanner does:**
-
-1. **Finds call sites** — walks the AST for method calls matching `*.GetApp(`, `*.GetApps(`, `*.GetService(`, `*.GetServices(`, `*.GetOrg(`, `*.GetOrgs(`, `*.GetSpaces(` on variables typed as `plugin.CliConnection` or any interface embedding it
-2. **Traces field access** — follows the return value through assignments and identifies which fields are accessed (`.Guid`, `.Name`, `.Routes[].Host`, etc.)
-3. **Outputs the YAML** — methods and their accessed fields, ready for the generator
-
-**Coverage tiers:**
-
-| Pattern | Example | Scanner Handles? |
-|---|---|---|
-| Direct field access | `app, _ := conn.GetApp(name); app.Guid` | **Yes** — straightforward AST pattern |
-| Iteration with field access | `for _, s := range services { s.Name }` | **Yes** — tracks range variable type |
-| Passed to helper function | `core.AppByGUID(apps, guid)` then `.Name` in caller | **Flagged for review** — cross-function data flow |
-| Stored in struct field | `svc.App = app` then `svc.App.Guid` later | **Flagged for review** — requires alias tracking |
-| Reflection / interface cast | `reflect.ValueOf(app).FieldByName("Guid")` | **No** — not expected in practice |
-
-The scanner does not need to be perfect. A conservative approach that identifies definitely-used fields and flags ambiguous cases for manual review is sufficient. The manual cases (cross-function, struct storage) are uncommon — the OCF Scheduler and metric-registrar analyses show that most plugins access fields directly at or near the call site.
-
-**Example output for OCF Scheduler:**
-
-```bash
-$ cf-plugin-migrate scan ./...
-Scanning ./...
-
-Found V2 domain method calls:
-  commands/create-job.go:42   conn.GetApp(appName)    → fields: .Guid
-  commands/create-call.go:38  conn.GetApp(appName)    → fields: .Guid
-  core/util.go:15             conn.GetApps()          → fields: .Guid, .Name
-
-Writing cf-plugin-migrate.yml
-```
+**Scan output:**
 
 ```yaml
-# cf-plugin-migrate.yml (generated by scan)
+schema_version: 1
 package: main
 methods:
   GetApp:
     fields: [Guid]
   GetApps:
     fields: [Guid, Name]
-```
-
-**Example output with flagged cases (metric-registrar):**
-
-```bash
-$ cf-plugin-migrate scan ./...
-Scanning ./...
-
-Found V2 domain method calls:
-  command/register.go:87      conn.GetApp(appName)    → fields: .Guid, .Name, .Routes
-  command/unregister.go:45    conn.GetApp(appName)    → fields: .Guid
-  command/unregister.go:92    conn.GetApp(appName)    → fields: .Guid
-  command/list.go:34          conn.GetApps()          → fields: .Guid, .Name
-  command/list.go:67          conn.GetApps()          → fields: .Guid, .Name
-  command/register.go:112     conn.GetServices()      → fields: .Name
-
-Routes sub-fields accessed:
-  command/register.go:95      .Routes[].Host, .Routes[].Domain.Name,
-                              .Routes[].Port, .Routes[].Path
-
-Writing cf-plugin-migrate.yml
-```
-
-#### Migration Path with Generated Wrappers
-
-1. **Scan** — Run `cf-plugin-migrate scan ./...` to auto-detect V2 domain method calls and field usage, producing `cf-plugin-migrate.yml`. Review any flagged cases manually.
-2. **Review** — Check the generated YAML for completeness. Add any fields the scanner flagged but couldn't resolve.
-3. **Generate** — Run `cf-plugin-migrate generate` to produce the wrapper functions
-4. **Replace** — Change `conn.GetApp(name)` to `getApp(cfClient, space.Guid, name)` — same return type, existing code compiles unchanged
-5. **Evolve** — When ready, switch call sites to use go-cfclient V3 types directly and delete the generated wrappers
-
-This approach is a stepping stone, not a destination. The generated wrappers let plugins migrate incrementally without rewriting all domain logic at once, while avoiding the full cost of Rabobank's complete V2 reimplementation.
-
-#### Worked Example: OCF Scheduler Plugin
-
-The [OCF Scheduler plugin](https://github.com/cloudfoundry-community/ocf-scheduler-cf-plugin) demonstrates the generator approach on a real, actively maintained plugin. Source analysis reveals minimal V2 field usage:
-
-**Audit results:**
-
-| V2 Method | Call Sites | Fields Accessed | Purpose |
-|---|---|---|---|
-| `GetApp(name)` | `commands/create-job.go`, `commands/create-call.go` | `.Guid` only | Name→GUID resolution for Scheduler API calls |
-| `GetApps()` | `core/util.go:MyApps()` → 6 command files via `AppByGUID()` | `.Guid` (matching), `.Name` (display) | GUID→Name resolution for table output |
-
-No other fields are accessed — not `State`, `Routes`, `Memory`, `Instances`, or any other model attribute. The plugin uses the V2 model methods purely as a name/GUID mapping layer.
-
-**Configuration — `cf-plugin-migrate.yml`:**
-
-```yaml
-# ocf-scheduler-cf-plugin/cf-plugin-migrate.yml
-package: main
-methods:
-  GetApp:
-    fields: [Name, Guid]
-  GetApps:
-    fields: [Name, Guid]
 ```
 
 **Generated code — `v2compat_generated.go`:**
@@ -474,8 +528,6 @@ func MyApps(services *Services) ([]models.GetAppsModel, error) {
 }
 ```
 
-**What changes in `core/services.go`:**
-
 The `Services` struct gains a `CfClient` and `SpaceGUID`, initialized once at startup:
 
 ```go
@@ -496,6 +548,11 @@ type Services struct {
 }
 ```
 
+**Migration:**
+1. `go get github.com/cloudfoundry/go-cfclient/v3`
+2. Drop in generated `v2compat_generated.go`
+3. Add one line: `cliConnection, err := NewV2Compat(cliConnection)`
+
 **Result:**
 
 | Metric | Before (V2) | After (Generated) | Rabobank equivalent |
@@ -509,20 +566,19 @@ type Services struct {
 
 The `AppByGUID` helper in `core/util.go` requires no changes — it already operates on `models.GetAppsModel` which the generated `getApps()` returns. All 6 command files that call `MyApps()` → `AppByGUID()` continue to work unchanged.
 
-#### Worked Example: metric-registrar Plugin (Complex Migration)
+**Validated:** Built, installed via `cf install-plugin`, ran `cf create-job` against live CAPI V3 v3.180.0 — `GetApp` correctly resolved app name to GUID via V3.
 
-The [metric-registrar plugin](https://github.com/pivotal-cf/metric-registrar-cli) is the most V2-coupled active plugin in the survey. It uses three V2 domain methods **and** four V2 CAPI curl calls. This analysis covers the migration in two phases: helper functions first, then curl calls.
+##### metric-registrar (Complex: Domain Methods + Curl Calls)
 
-##### Phase 1: Helper Functions (V2 Domain Methods)
+The [metric-registrar plugin](https://github.com/pivotal-cf/metric-registrar-cli) is the most V2-coupled active plugin in the survey. It uses three V2 domain methods **and** four V2 CAPI curl calls. This analysis covers the migration in two phases: domain methods first, then curl calls.
 
-**Audit results:**
+**Phase 1: Domain Methods**
 
-| V2 Method | Call Sites | Fields Accessed | Purpose |
+| V2 Method | Call Sites | Fields Accessed | V3 API Calls |
 |---|---|---|---|
-| `GetApp(name)` | `register.go` (1), `unregister.go` (2) | `.Guid`, `.Name`, `.Routes[].Host`, `.Routes[].Domain.Name`, `.Routes[].Port`, `.Routes[].Path` | GUID for API calls; Name for errors; Routes for endpoint validation |
-| `GetApps()` | `list.go` (2 — log formats + metrics endpoints) | `.Guid`, `.Name` | GUID→Name mapping for display |
-| `GetServices()` | `register.go` (1) | `.Name` only | Check if UPS already exists by name |
-| `GetCurrentSpace()` | `registrations/fetcher.go` (1) | `.Guid` only | Space GUID for V2 UPS listing |
+| `GetApp(name)` | `register.go` (1), `unregister.go` (2) | `Guid`, `Name`, `Routes[].Host`, `Routes[].Domain.Name`, `Routes[].Port`, `Routes[].Path` | 2 (app + routes) |
+| `GetApps()` | `list.go` (2 — log formats + metrics endpoints) | `Guid`, `Name` | 1 |
+| `GetServices()` | `register.go` (1) | `Name` only | 1 (server-side filtered) |
 
 **Complexity difference from OCF Scheduler:** `GetApp()` here accesses **Routes with sub-fields** — this is the first case that needs a second V3 API call beyond `Applications.Single()`.
 
@@ -649,7 +705,7 @@ The V3 replacement is actually *better* — it filters server-side by name inste
 
 Phase 1 can be completed independently. The plugin continues to use `CliCommandWithoutTerminalOutput("curl", ...)` for the V2 endpoints until Phase 2.
 
-##### Phase 2: Replacing V2 `cf curl` Calls
+**Phase 2: Replacing V2 `cf curl` Calls**
 
 The plugin makes four V2 curl calls. Two migrate cleanly; two require a structural redesign.
 
@@ -737,18 +793,7 @@ _, err := cfClient.RouteDestinations.Add(ctx, routeGUID, client.RouteDestination
 
 This is the kind of migration that a generated wrapper **cannot solve** — it requires understanding the V3 domain model. The recommended approach is to rewrite `ports/ports.go` using go-cfclient's `Routes` and `RouteDestinations` resources directly.
 
-> **TODO:** The V2 ports → V3 route destinations migration deserves deeper analysis. Key open questions: How do route destinations interact with internal routes (used by metric-registrar for metrics endpoint exposure)? Does the `cf create-route --internal` + destination model fully replace the V2 ports array for internal service-to-service communication? Are there other plugins or CF features that depend on the V2 ports model? This analysis should be completed before the metric-registrar migration guide is finalized.
-
-**CLI command delegation (unchanged in both phases):**
-
-The four delegated CLI commands (`create-user-provided-service`, `bind-service`, `unbind-service`, `delete-service`) continue to use `CliCommandWithoutTerminalOutput`. These are multi-step workflow operations that the CLI manages internally. They can be replaced with go-cfclient calls as a future optimization, but they work correctly as-is and do not depend on V2 endpoints.
-
-| CLI Command | Can migrate to go-cfclient? | Priority |
-|---|---|---|
-| `create-user-provided-service` | Yes: `cfClient.ServiceInstances.CreateUserProvided()` | Low — CLI handles it fine |
-| `bind-service` | Yes: `cfClient.ServiceCredentialBindings.Create()` | Low |
-| `unbind-service` | Yes: `cfClient.ServiceCredentialBindings.Delete()` | Low |
-| `delete-service` | Yes: `cfClient.ServiceInstances.Delete()` | Low |
+> **TODO:** The V2 ports → V3 route destinations migration deserves deeper analysis. Key open questions: How do route destinations interact with internal routes (used by metric-registrar for metrics endpoint exposure)? Does the `cf create-route --internal` + destination model fully replace the V2 ports array for internal service-to-service communication?
 
 **Phase 2 result:**
 
@@ -760,9 +805,7 @@ The four delegated CLI commands (`create-user-provided-service`, `bind-service`,
 | `ports/ports.go` — write ports | Structural redesign | **High** — app-centric → route-centric |
 | CLI command delegation | Optional future work | Low — works as-is |
 
-##### Key Insight
-
-The metric-registrar migration reveals two distinct categories of V2→V3 work:
+**Key insight:** The metric-registrar migration reveals two distinct categories of V2→V3 work:
 
 1. **Substitution** — Same concept, different API shape. Domain methods (`GetApp`, `GetApps`, `GetServices`) and flat V2 endpoints (UPS listing, binding lookup) map to V3 equivalents with minor field-path changes. The generated wrapper approach handles this well.
 
@@ -770,44 +813,18 @@ The metric-registrar migration reveals two distinct categories of V2→V3 work:
 
 The transitional approach handles category 1 automatically and surfaces category 2 as the work that requires human judgment.
 
-### Step 5: Remove `CliCommand` / `CliCommandWithoutTerminalOutput` Usage
+##### mysql-cli-plugin (Heavy CliCommand Usage)
 
-Plugins that use `CliCommandWithoutTerminalOutput("curl", "/v3/...")` for CAPI access SHOULD migrate to go-cfclient or direct HTTP. The `cf curl` pattern parses CLI text output, which is fragile across CLI versions.
+The mysql-cli-plugin demonstrates the scanner's value for `CliCommand`-heavy plugins. The scanner detected 14 `CliCommand` calls:
 
-**Before:**
+- `bind-service`, `create-service`, `delete`, `push`, `start`, `logs`, `rename-service`, `service-key`, `create-service-key`, `delete-service-key`, 2× `curl`, plus 1 dynamic command via variable
+- Plus `GetService` domain method (fields: `LastOperation.State`, `LastOperation.Description`)
 
-```go
-output, err := conn.CliCommandWithoutTerminalOutput("curl", "/v3/apps?names=my-app")
-// Parse JSON from output[0]
-```
+The scan output gives the developer a complete inventory of what needs attention, categorized by urgency: domain methods (must migrate), curl calls (should migrate), workflow commands (can stay).
 
-**After:**
+### Companion Package Design
 
-```go
-apps, err := cfClient.Applications.ListAll(ctx,
-    &client.AppListOptions{Names: client.Filter{Values: []string{"my-app"}}})
-```
-
-Plugins that use `CliCommand` for workflow orchestration (`push`, `bind-service`, `restage`) may continue to do so during the transition, as these operations have no direct go-cfclient equivalent (they involve multi-step workflows managed by the CLI).
-
-### Step 6: Prepare for the V3 Interface
-
-Once the V3 plugin interface is available, migration from the transitional pattern is minimal:
-
-| Change | Transitional | V3 Interface |
-|---|---|---|
-| Entry point | `plugin.Start(myPlugin)` | `plugin.Start(myPlugin)` (unchanged) |
-| Connection type | `plugin.CliConnection` | `pluginapi.PluginContext` |
-| Client construction | `newCfClient(conn)` | `cfhelper.NewCfClient(ctx)` (companion package) |
-| Context methods | `conn.AccessToken()` | `ctx.AccessToken()` (same signatures) |
-| Domain methods | Already removed (using go-cfclient) | Not available (by design) |
-| Metadata | `GetMetadata()` return value | Embedded `CF_PLUGIN_METADATA:` marker |
-
-The most significant change is the metadata mechanism (embedded marker vs. runtime `GetMetadata()`). Plugin logic — the domain operations using go-cfclient — remains unchanged.
-
-## Companion Package Design
-
-The V3 RFC proposes a companion package at `code.cloudfoundry.org/cli-plugin-helpers/cfclient`. This package SHOULD be published ahead of the full V3 interface to support the transitional migration:
+The companion package at `code.cloudfoundry.org/cli-plugin-helpers/cfclient` SHOULD be published to support the transitional migration:
 
 ```go
 package cfhelper
@@ -863,52 +880,36 @@ func (c *cfConnection) CfClient() *client.Client {
 }
 ```
 
-Note: Unlike the Rabobank library, this companion package does **not** reimplement V2 domain methods via V3. Plugins SHOULD either use go-cfclient directly for domain operations, or use the [generated V2 compatibility wrappers](#alternative-generated-v2-compatibility-wrappers) that populate only the fields a plugin declares it needs.
+Note: Unlike the Rabobank library, this companion package does **not** reimplement V2 domain methods via V3. Plugins SHOULD either use go-cfclient directly for domain operations, or use the generated V2 compatibility wrappers that populate only the fields a plugin declares it needs.
 
-## Lessons from the Rabobank Implementation
+### Lessons from the Rabobank Implementation
 
-The Rabobank `cf-plugins` library validates this approach but also reveals pitfalls to avoid:
+The Rabobank `cf-plugins` library validates this approach but also reveals pitfalls to avoid.
 
-### What Worked
+#### What Worked
 
 - **Zero host changes.** The library wraps `plugin.CliConnection` and calls `plugin.Start()` — compatible with any CF CLI version.
 - **Incremental adoption.** Consumer plugins adopt at their own pace — 2 of 4 Rabobank consumers use the library.
 - **Two migration tiers.** `plugins.Start()` provides transparent V3 reimplementation; `plugins.Execute()` provides direct `CfClient()` access.
 
-### Rabobank Caveats in Context
-
-The Rabobank README lists several caveats. Some of these are **not actually limitations** — they are faithful representations of what V2 always provided. V2-era plugins were never coded to expect capabilities that only exist in V3:
-
-| Rabobank Caveat | Actually a problem? | Explanation |
-|---|---|---|
-| Single buildpack only | **No.** | V2's `BuildpackUrl` was always a single string. No existing V2 plugin expects multiple buildpacks. The wrapper correctly returns the first buildpack, which is what V2 returned. |
-| Single process type | **No.** | V2 had no concept of multiple process types. `Instances`, `Memory`, and `DiskQuota` always described a single process. The wrapper populates from the `web` process type, matching V2 behavior. Plugins that need multi-process data are V3-aware and should use go-cfclient V3 types directly. |
-| `IsAdmin` always false | **Avoidable cost tradeoff.** | Rabobank skipped the UAA role query to reduce API calls. The [generated wrapper](#alternative-generated-v2-compatibility-wrappers) includes the query only if the plugin declares it needs `IsAdmin`. |
-| No per-app stats in list | **Avoidable cost tradeoff.** | Rabobank omitted stats to avoid N+1 per-process calls. The generated wrapper includes stats calls only if the plugin declares it needs `RunningInstances`. |
-| 11 API calls for `GetApp()` | **Avoidable.** | Rabobank populates every field unconditionally. The generated wrapper makes only the calls needed for declared fields (e.g., 1 call for `Name`+`Guid`+`State`). |
-
-### Consumer Plugin Analysis: Historical and Current V2 Usage
+#### Consumer Plugin Analysis: Was the Full Reimplementation Necessary?
 
 The `cf-plugins` library reimplements **10 V2 domain methods** via V3. To evaluate whether this scope was justified, we analyzed both the current state and the git history of all 4 consumer plugins.
 
-#### Historical V2 Domain Method Usage
+**Historical V2 Domain Method Usage:**
 
-| Plugin | V2 Methods Used Historically | Duration | How They Migrated | Key Commits |
-|---|---|---|---|---|
-| scheduler-plugin | `GetServices()`, `GetService()`, `GetApp()` | Feb 2023 – Oct 2025 (2.5 years) | Migrated directly to go-cfclient/v3 — did **not** adopt cf-plugins | First: [`57130bdb`](https://github.com/rabobank/scheduler-plugin/commit/57130bdb), Migration: [`e682b800`](https://github.com/rabobank/scheduler-plugin/commit/e682b800) |
-| credhub-plugin | `GetService()` | Aug 2023 – Oct 2025 (2+ years) | Adopted cf-plugins — **2-line change** in `main.go` | First: [`e5355478`](https://github.com/rabobank/credhub-plugin/commit/e5355478), Migration: [`7cdaded9`](https://github.com/rabobank/credhub-plugin/commit/7cdaded9) |
-| npsb-plugin | None (context methods only, from day one) | N/A | No migration needed | First: [`ef0c3e10`](https://github.com/rabobank/npsb-plugin/commit/ef0c3e10) |
-| idb-plugin | None (built with cf-plugins from the start, Oct 2025) | N/A | Born V3-native via `CfClient()` | First: [`938005ae`](https://github.com/rabobank/idb-plugin/commit/938005ae) |
+| Plugin | V2 Methods Used Historically | How They Migrated | Key Commits |
+|---|---|---|---|
+| scheduler-plugin | `GetServices()`, `GetService()`, `GetApp()` | Migrated directly to go-cfclient/v3 — did **not** adopt cf-plugins | [`57130bdb`](https://github.com/rabobank/scheduler-plugin/commit/57130bdb), [`e682b800`](https://github.com/rabobank/scheduler-plugin/commit/e682b800) |
+| credhub-plugin | `GetService()` | Adopted cf-plugins — **2-line change** in `main.go` | [`e5355478`](https://github.com/rabobank/credhub-plugin/commit/e5355478), [`7cdaded9`](https://github.com/rabobank/credhub-plugin/commit/7cdaded9) |
+| npsb-plugin | None (context methods only, from day one) | No migration needed | [`ef0c3e10`](https://github.com/rabobank/npsb-plugin/commit/ef0c3e10) |
+| idb-plugin | None (built with cf-plugins from the start, Oct 2025) | Born V3-native via `CfClient()` | [`938005ae`](https://github.com/rabobank/idb-plugin/commit/938005ae) |
 
-The cf-plugins library was created **Oct 2, 2025** ([`a0486ef6`](https://github.com/rabobank/cf-plugins/commit/a0486ef6)), with its CliConnection wrapper landing Oct 13 ([`0443494a`](https://github.com/rabobank/cf-plugins/commit/0443494a)) and enhanced `Execute` support Oct 14 ([`dbaad4c8`](https://github.com/rabobank/cf-plugins/commit/dbaad4c8)). The scheduler-plugin's migration commit message is explicit: *"remove dependency on some cliConnection calls since they still require cf v2 api"*. Commit authorship confirms the same developer migrated the scheduler-plugin and then created the cf-plugins library, generalizing the migration pattern for other consumers.
+The cf-plugins library was created **Oct 2, 2025** ([`a0486ef6`](https://github.com/rabobank/cf-plugins/commit/a0486ef6)). The scheduler-plugin's migration commit message is explicit: *"remove dependency on some cliConnection calls since they still require cf v2 api"*. Commit authorship confirms the same developer migrated the scheduler-plugin and then created the cf-plugins library, generalizing the pattern for other consumers.
 
-#### The Library Solved a Real Problem
+**The library solved a real problem.** The credhub-plugin migration demonstrates the library's value: a 2-line change (`plugin.Start()` → `plugins.Start()`) transparently replaced V2 RPC-backed domain method calls with V3 API calls.
 
-The credhub-plugin migration demonstrates the library's value: a 2-line change (`plugin.Start()` → `plugins.Start()`) transparently replaced V2 RPC-backed domain method calls with V3 API calls. Without the library, credhub-plugin would have needed the kind of larger refactoring the scheduler-plugin did.
-
-#### But the Scope Was Broader Than Needed
-
-Across all 4 consumer plugins, historically and currently, only **3 of 10** reimplemented methods were ever called:
+**But the scope was broader than needed.** Across all 4 consumer plugins, historically and currently, only **3 of 10** reimplemented methods were ever called:
 
 | Reimplemented Method | Ever Called By | Fields Accessed |
 |---|---|---|
@@ -923,9 +924,9 @@ Across all 4 consumer plugins, historically and currently, only **3 of 10** reim
 | `GetOrgUsers()` | Never called | — |
 | `GetSpaceUsers()` | Never called | — |
 
-The library reimplemented 10 methods, but only 3 were ever used — and those 3 accessed a combined total of **5 unique fields**. The remaining 7 reimplementations were speculative, anticipating broader adoption that hasn't materialized.
+The library reimplemented 10 methods, but only 3 were ever used — and those 3 accessed a combined total of **5 unique fields**. The remaining 7 reimplementations were speculative.
 
-#### Current State (Post-Migration)
+**Current State (Post-Migration):**
 
 | Plugin | Uses cf-plugins? | V2 Domain Methods Called Now | Fields Accessed Now |
 |---|---|---|---|
@@ -936,81 +937,43 @@ The library reimplemented 10 methods, but only 3 were ever used — and those 3 
 
 Today, only 1 method is called by 1 plugin, accessing 3 fields.
 
-#### What the Generated Wrapper Approach Would Have Produced
-
-For the scheduler-plugin's historical usage:
-
-```yaml
-methods:
-  GetApp:
-    fields: [Guid]
-  GetService:
-    fields: [Guid, ServiceOffering.Name]
-  GetServices:
-    fields: [Name, ServiceOffering.Name]
-```
-
-For credhub-plugin's current usage:
-
-```yaml
-methods:
-  GetService:
-    fields: [Guid, ServiceOffering.Name, LastOperation.State]
-```
-
-Each would generate minimal wrappers with 1–2 V3 API calls per method, instead of the library's comprehensive reimplementation. The 7 unused methods would never have been written.
-
 **Takeaway:** The cf-plugins library was a valid response to a real migration pressure, and the `plugins.Start()` pattern (transparent drop-in) was an elegant design. But the all-or-nothing reimplementation strategy — building every V2 method before knowing which ones consumers need — is exactly the waste the generated wrapper approach avoids. Build only what you use.
 
-### Implementation Bugs to Avoid
+#### What the Generated Approach Improves
 
-1. **Do not strip the token prefix manually.** Rabobank uses `token[7:]` to strip `"bearer "`. The go-cfclient `config.Token()` function handles this internally. Manual stripping is fragile if the prefix format ever changes.
+| Metric | Rabobank Library | Generated Wrapper |
+|---|---|---|
+| Methods reimplemented | 10 (all) | Only those declared in YAML |
+| API calls for `GetApp` | 10+ (all fields) | 1–10 (only declared field groups) |
+| API calls for `GetService` | 3 (instance, plan, offering) | **1** (using `fields` parameter) |
+| API calls for `GetServices` (N instances) | 1 + 3×N | **2** (using `fields` + `include`) |
+| Lines of wrapper code | ~500 | ~40–200 (varies by config) |
 
-2. **Do not hardcode SSL settings.** Rabobank calls `config.SkipTLSValidation()` unconditionally. The companion package MUST pass through the host's `IsSSLDisabled()` value.
+The most significant optimization is for service-related methods: the generator uses CAPI V3 `fields[service_plan]` and `fields[service_plan.service_offering]` parameters to retrieve instance, plan, and offering data in a **single API call**, eliminating the per-instance GET requests that Rabobank makes.
 
-3. **Do not hardcode user agent strings.** Rabobank uses `config.UserAgent("cfs-plugin/1.0.9")`. The companion package SHOULD derive the user agent from the plugin's metadata (name and version).
+#### Rabobank Caveats in Context
 
-## Implementation Checklist
+The Rabobank README lists several caveats. Some are **not actually limitations** — they faithfully represent what V2 always provided:
 
-The migration guide above describes the *what*. This section captures the concrete work needed to make the transitional approach production-ready.
+| Rabobank Caveat | Actually a problem? | Explanation |
+|---|---|---|
+| Single buildpack only | **No.** | V2's `BuildpackUrl` was always a single string. The wrapper correctly returns the first buildpack. |
+| Single process type | **No.** | V2 had no concept of multiple process types. The wrapper populates from the `web` process, matching V2 behavior. |
+| `IsAdmin` always false | **Avoidable.** | Rabobank skipped the UAA role query. The generated wrapper includes it only if declared. |
+| No per-app stats in list | **Avoidable.** | Rabobank omitted stats to avoid N+1 per-process calls. The generated wrapper includes stats calls only if the plugin declares it needs `RunningInstances`. |
+| 11 API calls for `GetApp()` | **Avoidable.** | Rabobank populates every field. The generated wrapper makes only the calls needed for declared fields. |
 
-### go-cfclient V3 Version Guidance
+#### Implementation Bugs to Avoid
+
+1. **Do not strip the token prefix manually.** Rabobank uses `token[7:]` to strip `"bearer "`. go-cfclient's `config.Token()` handles this internally.
+2. **Do not hardcode SSL settings.** Pass through the host's `IsSSLDisabled()` value.
+3. **Do not hardcode user agent strings.** Derive from the plugin's metadata.
+
+### go-cfclient V3 Guidance
 
 #### Library Status
 
-go-cfclient v3 is published at `github.com/cloudfoundry/go-cfclient/v3`. As of March 2026, the latest release is **v3.0.0-alpha.20**. The library has shipped 20 alpha releases but no stable v3.0.0. The README states: *"The v3 version in the main branch is currently under development and may have breaking changes until a v3.0.0 release is cut."*
-
-Despite the alpha label, the library is in production use by multiple CF CLI plugins and has near-complete CAPI V3 coverage.
-
-#### CAPI V3 Coverage
-
-go-cfclient v3 implements **31 of 35 CAPI V3 resource groups with full coverage**, 2 with partial coverage, and 1 missing. Every resource needed for plugin migration is fully supported:
-
-| Resource Group | Coverage | Notes |
-|---|---|---|
-| Apps, Processes, Builds, Droplets, Packages | Full | Includes `PollStaged`, `PollReady` utilities |
-| Routes, Route Destinations | Full | `InsertDestinations`, `ReplaceDestinations`, `RemoveDestination` |
-| Service Instances (managed + user-provided) | Full | `CreateManaged`, `CreateUserProvided`, sharing support |
-| Service Credential Bindings | Full | Includes `GetDetails`, `GetParameters` |
-| Service Plans, Offerings, Brokers | Full | Includes `Include` variants for eager loading |
-| Service Route Bindings | Full | |
-| Organizations, Spaces, Roles, Users | Full | Includes `Include` variants for eager loading |
-| Domains, Stacks, Security Groups | Full | |
-| Tasks, Deployments, Sidecars | Full | |
-| Isolation Segments, Quotas (org + space) | Full | |
-| Feature Flags, Manifests, Resource Matches | Full | |
-| Audit Events, Usage Events (app + service) | Full | |
-| Revisions, Buildpacks, Jobs | Full | `PollComplete` for async operations |
-| Info (`/v3/info`) | **None** | Platform metadata — rarely needed by plugins |
-| Root (`/`, `/v3`) | Partial | Missing `/v3/info` and `/v3/usage_summary` |
-| Space Features | Partial | Only SSH; generic feature pattern not exposed |
-
-The library adds value beyond raw CAPI coverage:
-- **Pagination:** `ListAll` (auto-pages), `First`, `Single` helpers
-- **Include-based eager loading:** e.g., list apps with their spaces and orgs in one call
-- **Async job polling:** `PollComplete`, `PollStaged`, `PollReady`
-- **Typed filters:** `AppListOptions`, `ServiceInstanceListOptions`, etc.
-- **CF error codes:** typed predicates for error handling
+go-cfclient v3 is published at `github.com/cloudfoundry/go-cfclient/v3`. As of March 2026, the latest release is **v3.0.0-alpha.20**. Despite the alpha label, the library is in production use by multiple CF CLI plugins and has near-complete CAPI V3 coverage.
 
 #### Versions in Production Use
 
@@ -1027,16 +990,24 @@ The spread from alpha.9 to alpha.19 indicates breaking changes between versions 
 
 #### Minimum Version Recommendation
 
-Plugins adopting the transitional approach SHOULD use **v3.0.0-alpha.17 or later**. This version:
-- Includes the `config.Token()` function that handles the `"bearer "` prefix internally
+Plugins SHOULD use **v3.0.0-alpha.17 or later**. This version:
+- Includes `config.Token()` that handles the `"bearer "` prefix internally
 - Supports `config.SkipTLSValidation()` with a boolean parameter
-- Has stable interfaces for all resources used by the generated wrappers (Apps, Routes, Service Instances, Service Credential Bindings, Service Plans, Service Offerings)
+- Has stable interfaces for all resources used by the generated wrappers
 
-Plugins SHOULD pin to a specific alpha version in `go.mod` and upgrade deliberately, testing for breaking changes. Once go-cfclient releases v3.0.0 stable, all plugins SHOULD upgrade to it.
+Plugins SHOULD pin to a specific alpha version in `go.mod` and upgrade deliberately. Once go-cfclient releases v3.0.0 stable, all plugins SHOULD upgrade to it.
+
+#### CAPI V3 Coverage
+
+go-cfclient v3 implements **31 of 35 CAPI V3 resource groups with full coverage**. Every resource needed for plugin migration is fully supported. The library adds value beyond raw coverage:
+- **Pagination:** `ListAll` (auto-pages), `First`, `Single` helpers
+- **Include-based eager loading:** e.g., list apps with their spaces and orgs in one call
+- **Async job polling:** `PollComplete`, `PollStaged`, `PollReady`
+- **Typed filters:** `AppListOptions`, `ServiceInstanceListOptions`, etc.
 
 #### CF API Version Floor
 
-go-cfclient v3 requires CAPI V3 endpoints. The minimum CF API version depends on which resources the plugin uses:
+go-cfclient v3 requires CAPI V3 endpoints. The minimum depends on which resources the plugin uses:
 
 | Resource | Minimum CAPI Version | CF Deployment |
 |---|---|---|
@@ -1046,27 +1017,48 @@ go-cfclient v3 requires CAPI V3 endpoints. The minimum CF API version depends on
 | Route Destinations | 3.77.0 | ~18.0+ |
 | Service Plans, Offerings | 3.77.0 | ~18.0+ |
 
-Most actively maintained CF foundations run CAPI 3.100+ (CF Deployment 25+), so the version floor is not a practical concern for current deployments. The generated wrappers SHOULD document the minimum CAPI version per V3 resource used.
+Most actively maintained CF foundations run CAPI 3.100+ (CF Deployment 25+), so the version floor is not a practical concern. The generated wrappers SHOULD document the minimum CAPI version per V3 resource used.
+
+#### Token Lifecycle
+
+`AccessToken()` returns a *snapshot* token — go-cfclient does not get a refresh token. For long-running plugins, use `config.TokenProvider()`:
+
+```go
+cfg, _ := config.New(endpoint,
+    config.TokenProvider(func() (string, error) {
+        return conn.AccessToken() // re-fetches from host RPC each time
+    }),
+    config.SkipTLSValidation(skipSSL),
+)
+```
+
+This re-fetches from the host's RPC each time the client needs a token, preventing expiry issues.
 
 ### UAA and CredHub
 
-The CAPI V2→V3 transition does not affect UAA or CredHub interfaces. Survey analysis confirms that plugin interaction with these services is minimal and falls outside the plugin interface contract:
+The CAPI V2→V3 transition does not affect UAA or CredHub interfaces. Only 1 of 18 surveyed plugins calls UAA directly (a `client_credentials` token exchange). Only 1 plugin talks to CredHub (via a CAPI-resolved broker URL). The core contract's `AccessToken()` covers plugin needs.
 
-- **UAA:** Only 1 of 18 surveyed plugins (html5-apps-repo) calls UAA directly — a `client_credentials` token exchange for service-specific access. All other plugins consume UAA-issued tokens exclusively through the host's `AccessToken()` method.
-- **CredHub:** Only 1 plugin (credhub-plugin) talks to a CredHub service broker API, using CAPI to resolve the broker URL. It does not interact with the CredHub credential store directly.
+### Error Handling at the Boundary
 
-The core contract's `AccessToken()` covers plugin developer needs. Plugins requiring service-specific tokens or credential store access handle that themselves outside the plugin interface, and those patterns are unaffected by the CAPI V2→V3 migration.
+| Failure | Source | Recommended Handling |
+|---|---|---|
+| Empty API endpoint | `ApiEndpoint()` returns `""` | Fail fast: `"no API target — run 'cf api' first"` |
+| Empty access token | `AccessToken()` returns `""` | Fail fast: `"not logged in — run 'cf login' first"` |
+| Token expired during V3 call | go-cfclient returns 401 | Use `config.TokenProvider()` to re-fetch from host |
+| V3 endpoint not available | go-cfclient returns 404 | Report minimum CAPI version required |
+| Host RPC disconnected | `CliConnection` method returns error | Fail with context: the host (CLI) may have exited |
 
-### Dependency Management
+### Backward Compatibility
 
-- **CLI SDK version pinning.** Most plugins import `code.cloudfoundry.org/cli v7.1.0+incompatible`; a few use `code.cloudfoundry.org/cli/v8`. The transitional approach does not change this — both work.
-- **Dependency tree impact.** Adding go-cfclient/v3 pulls in `golang.org/x/oauth2`, `google.golang.org/protobuf`, and several other transitive dependencies. For plugins that vendor dependencies, this increases the vendor directory. For plugins using module proxies, the impact is minimal.
+- **CLI version compatibility.** The transitional approach works with any CF CLI that implements `plugin.CliConnection` (v6.16+, v7, v8, v9). No host changes are required.
+- **CAPI version compatibility.** go-cfclient/v3 requires CAPI V3 endpoints. Foundations running CF API v3.x (CF Deployment 1.x+) are supported. The generated wrappers SHOULD document the minimum CAPI version per V3 resource used.
 
 ### Build System Integration
 
-- **`//go:generate` directive** for the generated V2 compatibility wrappers. Plugins add a single line (e.g., `//go:generate cf-plugin-migrate generate`) to trigger regeneration.
-- **Makefile target** (e.g., `make generate`) for plugins that use Make-based builds.
-- **Generated file placement.** The generated file SHOULD live alongside the plugin source (e.g., `v2compat_generated.go`) and SHOULD be checked into version control so that `go install` works without the generator tool.
+- **`//go:generate` directive** for regeneration: `//go:generate cf-plugin-migrate generate`
+- **Makefile target** (e.g., `make generate`) for Make-based builds
+- **Generated file** SHOULD be checked into version control so `go install` works without the generator tool
+- **Dependency management.** Adding go-cfclient/v3 pulls in `golang.org/x/oauth2`, `google.golang.org/protobuf`, and several transitive dependencies. For plugins that vendor dependencies, this increases the vendor directory. For plugins using module proxies, the impact is minimal.
 
 ### Test Migration
 
@@ -1074,41 +1066,57 @@ The core contract's `AccessToken()` covers plugin developer needs. Plugins requi
 - **New domain tests mock go-cfclient.** Plugins that switch to go-cfclient V3 for domain operations need either a `*httptest.Server` or a mock client. go-cfclient provides `fake.Client` in its test package.
 - **Generated wrapper tests.** The generator SHOULD produce a companion `_test.go` file with table-driven tests that verify correct field population against a test server.
 
-### Token Lifecycle
+### Proof-of-Concept Candidates
 
-The `AccessToken()` method returns a *snapshot* token — go-cfclient does not get a refresh token. For short-lived operations this is fine, but long-running plugins risk token expiry.
+To validate the transitional approach, three plugins from the [plugin survey](plugin-survey.md) represent increasing levels of migration complexity:
 
-**Recommended pattern:** Pass a token provider function instead of a static token:
+#### Tier 1: Simple — list-services
 
-```go
-func tokenProvider(conn plugin.CliConnection) func() (string, error) {
-    return func() (string, error) {
-        return conn.AccessToken()
-    }
-}
-```
+- **V2 methods used:** `GetApp()` — for GUID resolution only
+- **Fields consumed:** `Guid` only (1 field → 1 V3 API call)
+- **Migration:** Replace `conn.GetApp(name)` with `cfClient.Applications.Single(ctx, opts)`, read `.GUID` — or generate a wrapper that returns `GetAppModel{Guid: app.GUID}`
+- **Why:** Simplest possible case. Validates the end-to-end flow with minimal risk.
 
-go-cfclient's `config.TokenProvider()` option accepts this pattern, re-fetching from the host's RPC each time the client needs a token. This is how the App Autoscaler plugin's token expiry pain point SHOULD be resolved.
+#### Tier 2: Moderate — OCF Scheduler
 
-### `cf-plugin-migrate` Tool
+- **V2 methods used:** `GetApp()`, `GetApps()`
+- **Fields consumed:** `Name`, `Guid`, `State` (3 fields → 1 V3 API call each)
+- **Migration:** Two methods to replace, both using only core app fields available from a single `Applications` call
+- **Why:** Actively maintained, representative of the common pattern. Already uses direct HTTP for scheduler operations — only the app lookup needs migration.
 
-The tool has two subcommands — `scan` (audit) and `generate` (code generation):
+#### Tier 3: Complex — metric-registrar
 
-```
-cf-plugin-migrate scan ./...          # AST-based audit → cf-plugin-migrate.yml
-cf-plugin-migrate generate            # YAML config → v2compat_generated.go
-```
+- **V2 methods used:** `GetApp()`, `GetApps()`, `GetServices()`
+- **Additional V2 dependency:** `cf curl /v2/user_provided_service_instances`, `/v2/apps/{guid}`
+- **Fields consumed:** Multiple fields across app and service models
+- **Migration:** Requires both generated wrappers (for V2 model methods) and `cf curl` replacement (for V2 CAPI endpoints). Tests the full migration path.
+- **Why:** Most V2-coupled active plugin. If the transitional approach works here, it works everywhere.
 
-**Implementation scope:**
+#### Secondary Candidates
 
-- **`scan`** — Uses `go/ast` and `go/types` to find V2 domain method call sites, trace field access on return values, and emit the YAML config. Flags cross-function data flow for manual review. See [Automated Audit](#automated-audit-cf-plugin-migrate-scan) for design details.
-- **`generate`** — Reads the YAML config, maps fields to V3 API calls using a field dependency table, and emits Go source with typed go-cfclient calls. See [How It Works](#how-it-works) and [Field-to-API-Call Mapping](#field-to-api-call-mapping) for the generation model.
-- **YAML schema** for `cf-plugin-migrate.yml` — see [YAML Schema](#yaml-schema-cf-plugin-migrateyml)
-- **Field-to-API-call mapping** maintained as a data table in the tool, updatable as go-cfclient evolves — see [Complete V2→V3 Field Mapping Reference](#complete-v2v3-field-mapping-reference)
-- **V2 model struct reference** — see [V2 Plugin Model Struct Reference](#v2-plugin-model-struct-reference)
-- **Packaging** — standalone CLI tool, installable via `go install`. Proposed location: `code.cloudfoundry.org/cli-plugin-helpers/cmd/cf-plugin-migrate`
+| Plugin | V2 Methods | Notes |
+|---|---|---|
+| spring-cloud-services | `GetService()`, `GetApps()` | Clean architecture, good test of service model migration |
+| stack-auditor | `GetOrgs()` + `cf curl /v2/...` | Tests migration of both model methods and V2 curl calls |
+| service-instance-logs | `GetService()` | V2 chain traversal (service → plan → service offering) — complex V3 mapping |
 
-#### YAML Schema: `cf-plugin-migrate.yml`
+### Future Work: CAPI OpenAPI and Polyglot Clients
+
+CAPI V3 has **no official OpenAPI specification**. All existing client libraries (Go, Java, Python) are hand-written. The community [capi-openapi-spec](https://github.com/cloudfoundry-community/capi-openapi-spec) project is the most promising path toward a machine-readable spec, which would enable auto-generated clients in any language.
+
+Available CAPI V3 client libraries:
+
+| Library | Language | Status |
+|---|---|---|
+| [go-cfclient](https://github.com/cloudfoundry/go-cfclient) | Go | Official, recommended |
+| [cf-java-client](https://github.com/cloudfoundry/cf-java-client) | Java | Official |
+| [cf-python-client](https://github.com/cloudfoundry-community/cf-python-client) | Python | Community |
+
+## Technical Reference
+
+This section provides the detailed data tables used by the `cf-plugin-migrate` tool. It is primarily for tool developers and contributors.
+
+### YAML Schema: `cf-plugin-migrate.yml`
 
 The YAML configuration declares which V2 domain methods the plugin calls and which fields it accesses. The generator uses this to produce minimal wrappers with only the V3 API calls required.
 
@@ -1154,6 +1162,15 @@ methods:
     fields: [Guid, Username, Roles]
   GetSpaceUsers:
     fields: [Guid, Username, Roles]
+
+# CliCommand calls detected by scanner (informational — not consumed by generator)
+cli_commands:
+  - file: main.go
+    line: 92
+    method: CliCommandWithoutTerminalOutput
+    command: curl
+    endpoint: v2/apps
+    v3_endpoint: /v3/apps
 ```
 
 **Schema rules:**
@@ -1165,6 +1182,7 @@ methods:
 | `methods` | Map of V2 method name → field specification. Only methods listed are generated. |
 | `fields` | List of top-level field names from the corresponding `plugin_models.*` struct. Must match the Go field name exactly. |
 | `*_fields` | Sub-field specifiers for composite fields. Named `{lowercase_parent}_fields`. Dot notation for nested access (e.g., `Domain.Name`). Only required when the parent field is listed in `fields`. |
+| `cli_commands` | Scanner output for CliCommand calls. Informational — the generator does not consume this section. |
 
 **Supported methods and sub-field keys:**
 
@@ -1181,22 +1199,12 @@ methods:
 | `GetOrgUsers` | `[]GetOrgUsers_Model` | (none — flat struct) |
 | `GetSpaceUsers` | `[]GetSpaceUsers_Model` | (none — flat struct) |
 
-Methods not in this table (`GetCurrentOrg`, `GetCurrentSpace`, `AccessToken`, `ApiEndpoint`, etc.) are context methods that pass through to the host unchanged. They do not need wrappers.
+### V3 API `include` and `fields` Parameter Availability
 
-#### Complete V2→V3 Field Mapping Reference
-
-This section provides the field-to-API-call mapping the `generate` subcommand uses as its knowledge base. Fields are organized into **dependency groups** — sets of fields that share the same V3 API call. The generator adds a V3 call only when at least one field from that group is requested.
-
-The mapping is derived from first-principles analysis of the [V2 plugin model types](https://github.com/cloudfoundry/cli/tree/main/plugin/models) and the [CAPI V3 API documentation](https://v3-apidocs.cloudfoundry.org), validated against the [Rabobank implementation](https://github.com/rabobank/cf-plugins/blob/main/connection.go) and tested against a live CAPI V3 endpoint (v3.180.0). See [V2 Plugin Model Struct Reference](#v2-plugin-model-struct-reference) for the complete Go type definitions.
-
-##### V3 API `include` and `fields` Parameter Availability
-
-The CAPI V3 API supports two mechanisms for retrieving related resources in a single call, reducing the need for per-item requests:
+The CAPI V3 API supports two mechanisms for retrieving related resources in a single call:
 
 - **`include`** — returns full related resources in an `included` section of the response
 - **`fields`** — returns selected fields of related resources (supports nested paths like `service_plan.service_offering`)
-
-The [CAPI V3 API documentation](https://v3-apidocs.cloudfoundry.org) defines the available `include`, `fields`, and filter parameters for each resource. The table below summarizes the parameters relevant to the field mapping, verified against CAPI V3 v3.180.0:
 
 | Endpoint | `include` Values | `fields` Resources |
 |---|---|---|
@@ -1208,18 +1216,33 @@ The [CAPI V3 API documentation](https://v3-apidocs.cloudfoundry.org) defines the
 | `/v3/service_instances` | — | `service_plan`, `service_plan.service_offering`, `service_plan.service_offering.service_broker` |
 | `/v3/service_plans` | `service_offering` | `service_offering.service_broker` |
 | `/v3/service_offerings` | — | `service_broker` |
-| `/v3/processes` | — | — |
-| `/v3/domains` | — | — |
-| `/v3/droplets` | — | — |
-| `/v3/packages` | — | — |
-| `/v3/stacks` | — | — |
-| `/v3/security_groups` | — | — |
-| `/v3/organization_quotas` | — | — |
-| `/v3/space_quotas` | — | — |
 
-The generator SHOULD use `include` and `fields` parameters where available to minimize API calls. This is particularly impactful for service-related models where Rabobank makes N+1 calls that `fields` can eliminate entirely.
+The generator uses `include` and `fields` where available to minimize API calls.
 
-##### GetAppModel — `GetApp(appName string)`
+### Generator Optimization Summary
+
+The `include` and `fields` parameters available in CAPI V3 significantly reduce API calls compared to Rabobank's approach:
+
+| Method | Rabobank Calls | Generator Calls (all fields) | Key Optimization |
+|---|---|---|---|
+| `GetApp` | 10 | 10 | `include=domain` on routes (eliminates URL parsing) |
+| `GetApps` | 1 (partial) | 1 + per-app | Per-app calls for process/stats fields; results scoped by user permissions |
+| `GetService` | 3 | **1** | `fields[service_plan]` + `fields[service_plan.service_offering]` |
+| `GetServices` | 1 + 3×N | **2** | `fields` on list + single bindings call with `include=app` |
+| `GetOrg` | 5 | 5 | No `include`/`fields` available on these endpoints |
+| `GetSpace` | 7 | **6** | `include=organization` on spaces (eliminates org GET) |
+| `GetOrgUsers` | 2 | 2 | Both use `include=user` |
+| `GetSpaceUsers` | 3 | 3 | Both use `include=user` |
+
+The most dramatic improvement is for service-related methods: `GetService` drops from 3 calls to 1, and `GetServices` drops from 1 + 3×N calls to 2 calls regardless of instance count.
+
+### Complete V2→V3 Field Mapping Reference
+
+Fields are organized into **dependency groups** — sets of fields that share the same V3 API call. The generator adds a V3 call only when at least one field from that group is requested.
+
+The mapping is derived from first-principles analysis of the [V2 plugin model types](https://github.com/cloudfoundry/cli/tree/main/plugin/models) and the [CAPI V3 API documentation](https://v3-apidocs.cloudfoundry.org), validated against the [Rabobank implementation](https://github.com/rabobank/cf-plugins/blob/main/connection.go) and tested against a live CAPI V3 endpoint (v3.180.0).
+
+#### GetAppModel — `GetApp(appName string)`
 
 The most complex model. Rabobank populates all fields with 10 V3 API calls. The generated approach selects only the groups needed.
 
@@ -1255,19 +1278,15 @@ The most complex model. Rabobank populates all fields with 10 V3 API calls. The 
 | **8: Routes** | `Routes.ListForApp(appGUID, include=domain)` | `Routes[].Guid` | `.GUID` | `include=domain` eliminates separate domain lookups |
 | | | `Routes[].Host` | `.Host` | |
 | | | `Routes[].Path` | `.Path` | |
-| | | `Routes[].Port` | `.Port` | Pointer. V3 route port ≠ V2 app port — see [ports discussion](#structural-change-portsportsgo) |
+| | | `Routes[].Port` | `.Port` | Pointer |
 | | | `Routes[].Domain.Guid` | `.Relationships.Domain.Data.GUID` | |
-| | | `Routes[].Domain.Name` | (included Domain).Name | Via `include=domain` — no URL parsing needed |
+| | | `Routes[].Domain.Name` | (included Domain).Name | Via `include=domain` |
 | **9: Services** | `ServiceCredentialBindings.List(appGUID, include=service_instance)` | `Services[].Guid` | (included SI).GUID | `include=service_instance` avoids N+1 |
 | | | `Services[].Name` | (included SI).Name | |
 
-**Dependency chain:** Group 3 requires Group 2 (process GUID). Group 5 requires Group 4 (stack name from droplet). All other groups are independent and can be called concurrently.
+**Dependency chain:** Group 3 requires Group 2 (process GUID). Group 5 requires Group 4 (stack name from droplet). All other groups are independent.
 
-**`include` optimizations vs Rabobank:**
-- **Group 8 (Routes):** The `/v3/routes` endpoint supports `include=domain`. The generator uses this to get domain names directly from the included resources, eliminating Rabobank's URL-parsing workaround.
-- **Group 9 (Services):** Both the generator and Rabobank use `include=service_instance` on service credential bindings.
-
-##### GetAppsModel — `GetApps()`
+#### GetAppsModel — `GetApps()`
 
 | Group | V3 API Call(s) | V2 Fields | V3 Field Path | Notes |
 |---|---|---|---|---|
@@ -1277,183 +1296,76 @@ The most complex model. Rabobank populates all fields with 10 V3 API calls. The 
 | **2: Process** | `Processes.ListForApp()` **per app** | `TotalInstances` | `.Instances` | Per-app call |
 | | | `Memory` | `.MemoryInMB` | |
 | | | `DiskQuota` | `.DiskInMB` | |
-| **3: Stats** | `Processes.GetStats()` **per app** | `RunningInstances` | `len(.Stats)` | Per-app call — requires Group 2 |
-| **4: Routes** | `Routes.ListForApp(include=domain)` **per app** | `Routes[].*` | (see GetAppModel Group 8) | Per-app call — `include=domain` for domain names |
+| **3: Stats** | `Processes.GetStats()` **per app** | `RunningInstances` | `len(.Stats)` | Requires Group 2 |
+| **4: Routes** | `Routes.ListForApp(include=domain)` **per app** | `Routes[].*` | (see GetAppModel Group 8) | Per-app call |
 
-**Per-app calls:** Groups 2–4 require per-app API calls because `/v3/processes` and `/v3/routes` do not support `include` or `fields` parameters. The V2 CLI populated these from a summary endpoint — no V3 equivalent exists. The number of calls matches the number of apps visible to the user based on their permissions (space developer, org auditor, admin, etc.).
-
-The YAML output from `scan` notes the additional calls:
-
-```yaml
-methods:
-  GetApps:
-    fields: [Guid, Name, State]
-    # Additional calls per app: TotalInstances, RunningInstances, Memory, DiskQuota
-```
-
-Rabobank's `GetApps()` only populates Name, Guid, and State (Group 1).
-
-##### GetService_Model — `GetService(serviceName string)`
+#### GetService_Model — `GetService(serviceName string)`
 
 | Group | V3 API Call(s) | V2 Fields | V3 Field Path | Notes |
 |---|---|---|---|---|
-| **1: Instance+Plan+Offering** | `ServiceInstances.Single(name, spaceGUID)` with `fields[service_plan]=name,guid,relationships.service_offering` and `fields[service_plan.service_offering]=name,documentation_url` | `Guid` | `.GUID` | **Single call** — `fields` parameters include plan and offering |
+| **1: Instance+Plan+Offering** | `ServiceInstances.Single(name, spaceGUID)` with `fields[service_plan]` and `fields[service_plan.service_offering]` | `Guid` | `.GUID` | **Single call** — `fields` parameters include plan and offering |
 | | | `Name` | `.Name` | |
 | | | `DashboardUrl` | `.DashboardURL` | Pointer |
 | | | `IsUserProvided` | `.Type == "user-provided"` | |
-| | | `LastOperation.Type` | `.LastOperation.Type` | |
-| | | `LastOperation.State` | `.LastOperation.State` | |
-| | | `LastOperation.Description` | `.LastOperation.Description` | |
-| | | `LastOperation.CreatedAt` | `.LastOperation.CreatedAt.String()` | |
-| | | `LastOperation.UpdatedAt` | `.LastOperation.UpdatedAt.String()` | |
+| | | `LastOperation.*` | `.LastOperation.*` | |
 | | | `ServicePlan.Name` | (included plan).Name | Via `fields[service_plan]` |
-| | | `ServicePlan.Guid` | (included plan).GUID | Via `fields[service_plan]` |
+| | | `ServicePlan.Guid` | (included plan).GUID | |
 | | | `ServiceOffering.Name` | (included offering).Name | Via `fields[service_plan.service_offering]` |
-| | | `ServiceOffering.DocumentationUrl` | (included offering).DocumentationURL | Via `fields[service_plan.service_offering]` |
+| | | `ServiceOffering.DocumentationUrl` | (included offering).DocumentationURL | |
 
-**Optimization:** The `/v3/service_instances` endpoint supports `fields[service_plan]` and `fields[service_plan.service_offering]`, allowing the instance, plan, and offering to be retrieved in a **single API call**. Rabobank makes 3 separate calls (instance, plan GET, offering GET). This is the most significant optimization the generator can make over the Rabobank approach.
+**Optimization:** Retrieves instance, plan, and offering in **1 API call** vs. Rabobank's 3.
 
-##### GetServices_Model — `GetServices()`
-
-| Group | V3 API Call(s) | V2 Fields | V3 Field Path | Notes |
-|---|---|---|---|---|
-| **1: Instances+Plans+Offerings** | `ServiceInstances.ListAll(spaceGUID)` with `fields[service_plan]=name,guid` and `fields[service_plan.service_offering]=name` | `Guid` | `.GUID` | **Single call** — `fields` parameters include plans and offerings |
-| | | `Name` | `.Name` | |
-| | | `IsUserProvided` | `.Type == "user-provided"` | |
-| | | `LastOperation.Type` | `.LastOperation.Type` | |
-| | | `LastOperation.State` | `.LastOperation.State` | |
-| | | `ServicePlan.Name` | (included plan).Name | Via `fields[service_plan]` |
-| | | `ServicePlan.Guid` | (included plan).GUID | Via `fields[service_plan]` |
-| | | `Service.Name` | (included offering).Name | Via `fields[service_plan.service_offering]` |
-| **2: Apps** | `ServiceCredentialBindings.ListAll(include=app)` | `ApplicationNames` | (included App).Name | Single call with `include=app` for all bindings in space |
-
-**Optimization:** Using `fields` on the list call, the generator retrieves all service instances with their plans and offerings in a **single call** — eliminating the 2 × N separate GETs that Rabobank makes (one for plan, one for offering, per instance).
-
-For `ApplicationNames`, the generator can make a single `ServiceCredentialBindings.ListAll` call with `include=app` filtering by the space's service instance GUIDs, then group app names by instance. This replaces Rabobank's per-instance binding lookup.
-
-##### GetOrg_Model — `GetOrg(orgName string)`
+#### GetServices_Model — `GetServices()`
 
 | Group | V3 API Call(s) | V2 Fields | V3 Field Path | Notes |
 |---|---|---|---|---|
-| **1: Org** | `Organizations.Single(name)` | `Guid` | `.GUID` | Always required |
-| | | `Name` | `.Name` | |
-| **2: Quota** | `OrganizationQuotas.Get(org...Quota.Data.GUID)` | `QuotaDefinition.Guid` | `.GUID` | Only if org has a quota assigned |
-| | | `QuotaDefinition.Name` | `.Name` | |
-| | | `QuotaDefinition.MemoryLimit` | `.Apps.TotalMemoryInMB` | Pointer → `int64` |
-| | | `QuotaDefinition.InstanceMemoryLimit` | `.Apps.PerProcessMemoryInMB` | Pointer → `int64` |
-| | | `QuotaDefinition.RoutesLimit` | `.Routes.TotalRoutes` | Pointer → `int` |
-| | | `QuotaDefinition.ServicesLimit` | `.Services.TotalServiceInstances` | Pointer → `int` |
-| | | `QuotaDefinition.NonBasicServicesAllowed` | `.Services.PaidServicesAllowed` | |
-| **3: Spaces** | `Spaces.ListAll(orgGUID)` | `Spaces[].Guid` | `.GUID` | |
-| | | `Spaces[].Name` | `.Name` | |
-| **4: Domains** | `Domains.ListForOrganization(orgGUID)` | `Domains[].Guid` | `.GUID` | |
-| | | `Domains[].Name` | `.Name` | |
-| | | `Domains[].OwningOrganizationGuid` | `.Relationships.Organization.Data.GUID` | nil for shared domains |
-| | | `Domains[].Shared` | `.Relationships.Organization.Data == nil` | Shared = no owning org |
-| **5: SpaceQuotas** | `SpaceQuotas.ListAll(orgGUID)` | `SpaceQuotas[].Guid` | `.GUID` | |
-| | | `SpaceQuotas[].Name` | `.Name` | |
-| | | `SpaceQuotas[].MemoryLimit` | `.Apps.TotalMemoryInMB` | Pointer → `int64` |
-| | | `SpaceQuotas[].InstanceMemoryLimit` | `.Apps.PerProcessMemoryInMB` | Pointer → `int64` |
-| | | `SpaceQuotas[].RoutesLimit` | `.Routes.TotalRoutes` | Pointer → `int` |
-| | | `SpaceQuotas[].ServicesLimit` | `.Services.TotalServiceInstances` | Pointer → `int` |
-| | | `SpaceQuotas[].NonBasicServicesAllowed` | `.Services.PaidServicesAllowed` | |
+| **1: Instances+Plans+Offerings** | `ServiceInstances.ListAll(spaceGUID)` with `fields[service_plan]` and `fields[service_plan.service_offering]` | `Guid`, `Name`, `IsUserProvided`, `LastOperation.*`, `ServicePlan.*`, `Service.Name` | Various | **Single call** with `fields` |
+| **2: Apps** | `ServiceCredentialBindings.ListAll(include=app)` | `ApplicationNames` | (included App).Name | Single call with `include=app` |
 
-All groups are independent — no dependency chains.
+**Optimization:** 2 calls regardless of instance count vs. Rabobank's 1 + 3×N.
 
-##### GetOrgs_Model — `GetOrgs()`
+#### GetOrg_Model — `GetOrg(orgName string)`
 
-| Group | V3 API Call(s) | V2 Fields | V3 Field Path | Notes |
-|---|---|---|---|---|
-| **1: Orgs** | `Organizations.ListAll()` | `Guid` | `.GUID` | Single call |
-| | | `Name` | `.Name` | |
+| Group | V3 API Call(s) | V2 Fields |
+|---|---|---|
+| **1: Org** | `Organizations.Single(name)` | `Guid`, `Name` |
+| **2: Quota** | `OrganizationQuotas.Get(quotaGUID)` | `QuotaDefinition.*` |
+| **3: Spaces** | `Spaces.ListAll(orgGUID)` | `Spaces[].Guid`, `Spaces[].Name` |
+| **4: Domains** | `Domains.ListForOrganization(orgGUID)` | `Domains[].Guid`, `Domains[].Name`, `Domains[].OwningOrganizationGuid`, `Domains[].Shared` |
+| **5: SpaceQuotas** | `SpaceQuotas.ListAll(orgGUID)` | `SpaceQuotas[].Guid`, `SpaceQuotas[].Name`, ... |
 
-##### GetSpace_Model — `GetSpace(spaceName string)`
+#### GetSpace_Model — `GetSpace(spaceName string)`
 
-| Group | V3 API Call(s) | V2 Fields | V3 Field Path | Notes |
-|---|---|---|---|---|
-| **1: Space+Org** | `Spaces.Single(name, include=organization)` | `Guid` | `.GUID` | Always required. `include=organization` retrieves org in same call. |
-| | | `Name` | `.Name` | |
-| | | `Organization.Guid` | (included Org).GUID | Via `include=organization` — no separate org GET |
-| | | `Organization.Name` | (included Org).Name | |
-| **2: Apps** | `Applications.ListAll(spaceGUID)` | `Applications[].Guid` | `.GUID` | |
-| | | `Applications[].Name` | `.Name` | |
-| **3: Services** | `ServiceInstances.ListAll(spaceGUID)` | `ServiceInstances[].Guid` | `.GUID` | |
-| | | `ServiceInstances[].Name` | `.Name` | |
-| **4: Domains** | `Domains.ListAll(orgGUID)` | `Domains[].Guid` | `.GUID` | Org GUID from Group 1's included org |
-| | | `Domains[].Name` | `.Name` | |
-| | | `Domains[].OwningOrganizationGuid` | `.Relationships.Organization.Data.GUID` | |
-| | | `Domains[].Shared` | `.Relationships.Organization.Data == nil` | Rabobank sets all to `true` — incorrect |
-| **5: SecurityGroups** | `SecurityGroups.ListAll(runningSpaceGUID)` | `SecurityGroups[].Guid` | `.GUID` | Filters by running space only |
-| | | `SecurityGroups[].Name` | `.Name` | |
-| | | `SecurityGroups[].Rules` | `.Rules` → JSON marshal/unmarshal | Dynamic structure via `[]map[string]any` |
-| **6: SpaceQuota** | `SpaceQuotas.Get(space...Quota.Data.GUID)` | `SpaceQuota.Guid` | `.GUID` | Only if space has a quota assigned |
-| | | `SpaceQuota.Name` | `.Name` | |
-| | | `SpaceQuota.MemoryLimit` | `.Apps.TotalMemoryInMB` | Pointer → `int64` |
-| | | `SpaceQuota.InstanceMemoryLimit` | `.Apps.PerProcessMemoryInMB` | Pointer → `int64` |
-| | | `SpaceQuota.RoutesLimit` | `.Routes.TotalRoutes` | Pointer → `int` |
-| | | `SpaceQuota.ServicesLimit` | `.Services.TotalServiceInstances` | Pointer → `int` |
-| | | `SpaceQuota.NonBasicServicesAllowed` | `.Services.PaidServicesAllowed` | |
-
-**Optimization:** The `/v3/spaces` endpoint supports `include=organization`, eliminating the separate org GET that Rabobank makes. The org GUID is then available from the included data for the domains lookup in Group 4, removing the dependency chain.
-
-##### GetSpaces_Model — `GetSpaces()`
-
-| Group | V3 API Call(s) | V2 Fields | V3 Field Path | Notes |
-|---|---|---|---|---|
-| **1: Spaces** | `Spaces.ListAll()` | `Guid` | `.GUID` | Single call |
-| | | `Name` | `.Name` | |
-
-##### GetOrgUsers_Model — `GetOrgUsers(orgName string, args ...string)`
-
-| Group | V3 API Call(s) | V2 Fields | V3 Field Path | Notes |
-|---|---|---|---|---|
-| **1: Roles+Users** | `Organizations.Single(name)` + `Roles.ListAll(orgGUID, include=user)` | `Guid` | (included User).GUID | `include=user` returns roles and users in one call |
-| | | `Username` | (included User).Username | Pointer |
-| | | `Roles` | `role.Type` aggregated per user | Role types: `organization_user`, `organization_manager`, etc. |
-| | | `IsAdmin` | — | **Not available in V3.** V2 derived this from UAA admin scope. Always `false` in generated wrappers. |
-
-**IsAdmin caveat:** The V2 model includes `IsAdmin` but CAPI V3 roles do not expose global admin status. Rabobank omits it (always `false`). The generator SHOULD warn if this field is requested and document the limitation in the generated code.
-
-##### GetSpaceUsers_Model — `GetSpaceUsers(orgName, spaceName string)`
-
-| Group | V3 API Call(s) | V2 Fields | V3 Field Path | Notes |
-|---|---|---|---|---|
-| **1: Roles+Users** | `Organizations.Single(orgName)` + `Spaces.Single(spaceName, orgGUID)` + `Roles.ListAll(spaceGUID, include=user)` | `Guid` | (included User).GUID | `include=user` returns roles and users in one call |
-| | | `Username` | (included User).Username | Pointer |
-| | | `Roles` | `role.Type` aggregated per user | Role types: `space_developer`, `space_manager`, etc. |
-| | | `IsAdmin` | — | **Not available in V3.** See GetOrgUsers note. |
-
-##### Generator Optimization Summary
-
-The `include` and `fields` parameters available in CAPI V3 significantly reduce API calls compared to Rabobank's approach:
-
-| Method | Rabobank Calls | Generator Calls (all fields) | Key Optimization |
+| Group | V3 API Call(s) | V2 Fields | Notes |
 |---|---|---|---|
-| `GetApp` | 10 | 10 | `include=domain` on routes (eliminates URL parsing) |
-| `GetApps` | 1 (partial) | 1 + per-app | Per-app calls for process/stats fields; results scoped by user permissions |
-| `GetService` | 3 | **1** | `fields[service_plan]` + `fields[service_plan.service_offering]` |
-| `GetServices` | 1 + 3×N | **2** | `fields` on list + single bindings call with `include=app` |
-| `GetOrg` | 5 | 5 | No `include`/`fields` available on these endpoints |
-| `GetSpace` | 7 | **6** | `include=organization` on spaces (eliminates org GET) |
-| `GetOrgUsers` | 2 | 2 | Both use `include=user` |
-| `GetSpaceUsers` | 3 | 3 | Both use `include=user` |
+| **1: Space+Org** | `Spaces.Single(name, include=organization)` | `Guid`, `Name`, `Organization.*` | `include=organization` eliminates separate org GET |
+| **2: Apps** | `Applications.ListAll(spaceGUID)` | `Applications[].Guid`, `Applications[].Name` | |
+| **3: Services** | `ServiceInstances.ListAll(spaceGUID)` | `ServiceInstances[].Guid`, `ServiceInstances[].Name` | |
+| **4: Domains** | `Domains.ListAll(orgGUID)` | `Domains[].*` | Org GUID from Group 1's included org |
+| **5: SecurityGroups** | `SecurityGroups.ListAll(runningSpaceGUID)` | `SecurityGroups[].*` | |
+| **6: SpaceQuota** | `SpaceQuotas.Get(quotaGUID)` | `SpaceQuota.*` | Only if quota assigned |
 
-The most dramatic improvement is for service-related methods: `GetService` drops from 3 calls to 1, and `GetServices` drops from 1 + 3×N calls to 2 calls regardless of instance count.
+#### Simple Models
 
-##### Fields Not Available in V3
+| Method | V3 API Call | V2 Fields |
+|---|---|---|
+| `GetOrgs()` | `Organizations.ListAll()` | `Guid`, `Name` |
+| `GetSpaces()` | `Spaces.ListAll()` | `Guid`, `Name` |
+| `GetOrgUsers(orgName)` | `Organizations.Single()` + `Roles.ListAll(include=user)` | `Guid`, `Username`, `Roles`, `IsAdmin` (always false) |
+| `GetSpaceUsers(orgName, spaceName)` | `Organizations.Single()` + `Spaces.Single()` + `Roles.ListAll(include=user)` | `Guid`, `Username`, `Roles`, `IsAdmin` (always false) |
+
+#### Fields Not Available in V3
 
 | V2 Field | Model | Reason |
 |---|---|---|
 | `IsAdmin` | `GetOrgUsers_Model`, `GetSpaceUsers_Model` | V2 derived from UAA admin scope; V3 roles are CAPI-only |
 | `DetectedStartCommand` (distinct from `Command`) | `GetAppModel` | V3 does not distinguish detected vs explicit start command |
-| `GetAppsModel.Routes[].Domain.OwningOrganizationGuid` | `GetAppsModel` | Available but requires additional `Domains.Get()` per route domain |
-| `GetAppsModel.Routes[].Domain.Shared` | `GetAppsModel` | Same as above |
 
-#### V2 Plugin Model Struct Reference
+### V2 Plugin Model Struct Reference
 
-Complete Go type definitions from [`plugin/models/`](https://github.com/cloudfoundry/cli/tree/main/plugin/models) in the CF CLI source. These are the types returned by the V2 domain methods and populated by the generated wrappers.
+Complete Go type definitions from [`plugin/models/`](https://github.com/cloudfoundry/cli/tree/main/plugin/models) in the CF CLI source.
 
-##### App Models
+#### App Models
 
 ```go
 // GetAppModel — returned by GetApp(appName string)
@@ -1537,7 +1449,7 @@ type GetAppsDomainFields struct {
 }
 ```
 
-##### Service Models
+#### Service Models
 
 ```go
 // GetService_Model — returned by GetService(serviceName string)
@@ -1588,7 +1500,7 @@ type GetServices_ServiceFields struct {
 }
 ```
 
-##### Org Models
+#### Org Models
 
 ```go
 // GetOrg_Model — returned by GetOrg(orgName string)
@@ -1639,7 +1551,7 @@ type GetOrgs_Model struct {
 }
 ```
 
-##### Space Models
+#### Space Models
 
 ```go
 // GetSpace_Model — returned by GetSpace(spaceName string)
@@ -1694,7 +1606,7 @@ type GetSpaces_Model struct {
 }
 ```
 
-##### User Models
+#### User Models
 
 ```go
 // GetOrgUsers_Model — returned by GetOrgUsers(orgName string, args ...string)
@@ -1714,7 +1626,7 @@ type GetSpaceUsers_Model struct {
 }
 ```
 
-##### Context Models (Pass-through — No Wrappers Needed)
+#### Context Models (Pass-through — No Wrappers Needed)
 
 ```go
 // Organization — returned by GetCurrentOrg()
@@ -1734,120 +1646,14 @@ type Space struct {
 type SpaceFields struct {
     Guid, Name string
 }
-
-// GetOauthToken_Model — returned by GetOauthToken()  [not commonly used]
-type GetOauthToken_Model struct {
-    Token string
-}
 ```
 
 These context models are populated by the host via RPC and pass through unchanged. They do not need generated wrappers.
 
-### Error Handling at the Boundary
-
-The transitional wrapper sits between the host's RPC interface and the V3 API. Both sides can fail:
-
-| Failure | Source | Recommended Handling |
-|---|---|---|
-| Empty API endpoint | `ApiEndpoint()` returns `""` | Fail fast: `"no API target — run 'cf api' first"` |
-| Empty access token | `AccessToken()` returns `""` | Fail fast: `"not logged in — run 'cf login' first"` |
-| Token expired during V3 call | go-cfclient returns 401 | Use `config.TokenProvider()` to re-fetch from host |
-| V3 endpoint not available | go-cfclient returns 404 | Report minimum CAPI version required |
-| Host RPC disconnected | `CliConnection` method returns error | Fail with context: the host (CLI) may have exited |
-
-### Backward Compatibility
-
-- **CLI version compatibility.** The transitional approach works with any CF CLI that implements `plugin.CliConnection` (v6.16+, v7, v8, v9). No host changes are required.
-- **CAPI version compatibility.** go-cfclient/v3 requires CAPI V3 endpoints. Foundations running CF API v3.x (CF Deployment 1.x+) are supported. The generated wrappers SHOULD document the minimum CAPI version per V3 resource used.
-
-## Proof-of-Concept Candidates
-
-To validate the transitional approach, three plugins from the [plugin survey](plugin-survey.md) represent increasing levels of migration complexity:
-
-### Tier 1: Simple — list-services
-
-- **V2 methods used:** `GetApp()` — for GUID resolution only
-- **Fields consumed:** `Guid` only (1 field → 1 V3 API call)
-- **Migration:** Replace `conn.GetApp(name)` with `cfClient.Applications.Single(ctx, opts)`, read `.GUID` — or generate a wrapper that returns `GetAppModel{Guid: app.GUID}`
-- **Why:** Simplest possible case. Validates the end-to-end flow with minimal risk.
-
-### Tier 2: Moderate — OCF Scheduler
-
-- **V2 methods used:** `GetApp()`, `GetApps()`
-- **Fields consumed:** `Name`, `Guid`, `State` (3 fields → 1 V3 API call each)
-- **Migration:** Two methods to replace, both using only core app fields available from a single `Applications` call
-- **Why:** Actively maintained, representative of the common pattern. Already uses direct HTTP for scheduler operations — only the app lookup needs migration.
-
-### Tier 3: Complex — metric-registrar
-
-- **V2 methods used:** `GetApp()`, `GetApps()`, `GetServices()`
-- **Additional V2 dependency:** `cf curl /v2/user_provided_service_instances`, `/v2/apps/{guid}`
-- **Fields consumed:** Multiple fields across app and service models
-- **Migration:** Requires both generated wrappers (for V2 model methods) and `cf curl` replacement (for V2 CAPI endpoints). Tests the full migration path.
-- **Why:** Most V2-coupled active plugin. If the transitional approach works here, it works everywhere.
-
-### Secondary Candidates
-
-| Plugin | V2 Methods | Notes |
-|---|---|---|
-| spring-cloud-services | `GetService()`, `GetApps()` | Clean architecture, good test of service model migration |
-| stack-auditor | `GetOrgs()` + `cf curl /v2/...` | Tests migration of both model methods and V2 curl calls |
-| service-instance-logs | `GetService()` | V2 chain traversal (service → plan → service offering) — complex V3 mapping |
-
-## Relationship to the V3 Plugin Interface RFC
-
-This transitional approach is **Phase 0** — work that plugin developers can do immediately, before any host changes ship. The V3 RFC migration phases build on top of this:
-
-| Phase | Timeline | What Changes | Guest Action |
-|---|---|---|---|
-| **Phase 0: Transitional** | Now | Nothing (guest-side only) | Replace V2 domain methods with go-cfclient; adopt companion package pattern |
-| **Phase 1: Channel Abstraction** | Q3 2026 | Host adds `PluginChannel` interface, embedded metadata scanning | Add `CF_PLUGIN_METADATA:` marker to binary |
-| **Phase 2: JSON-RPC** | Q4 2026 | Host supports JSON-RPC protocol | Adopt JSON-RPC if polyglot support needed |
-| **Phase 3: Deprecation** | Q1 2027 | Host emits warnings for legacy guests | Verify no legacy method usage remains |
-| **Phase 4: Removal** | Q3 2027+ | Legacy gob/net-rpc removed | Already migrated |
-
-Plugins that complete Phase 0 will have minimal work remaining for Phases 1–4, since their domain logic already uses go-cfclient directly and their host interaction is limited to the core context methods that the V3 interface preserves.
-
-## Future Work: CAPI OpenAPI Specification and Polyglot Clients
-
-### The Missing Machine-Readable API Spec
-
-CAPI V3 has **no official OpenAPI or Swagger specification**. The V3 API docs at [v3-apidocs.cloudfoundry.org](https://v3-apidocs.cloudfoundry.org/) are generated from hand-written Slate Markdown, not from a machine-readable spec. This has been an open request since 2015, tracked as [cloud_controller_ng#2192](https://github.com/cloudfoundry/cloud_controller_ng/issues/2192) since 2021. A proof-of-concept to generate OpenAPI from CAPI's Ruby source code ([PR #4500](https://github.com/cloudfoundry/cloud_controller_ng/pull/4500)) was closed without merging.
-
-As a result, all existing CAPI client libraries — Go, Java, Python — are **hand-written**, not generated from a spec.
-
-### Community OpenAPI Efforts
-
-| Project | Approach | Status |
-|---|---|---|
-| [capi-openapi-spec](https://github.com/cloudfoundry-community/capi-openapi-spec) (cloudfoundry-community) | Parses V3 HTML docs → OpenAPI 3.0.0. Claims 100% coverage of 44 resource types (CAPI v3.195.0). | Active (June 2025) |
-| [capi-openapi-go-client](https://github.com/cloudfoundry-community/capi-openapi-go-client) (cloudfoundry-community) | Go client generated from the above spec via oapi-codegen | Active (June 2025) |
-| [cf-api-openapi-poc](https://github.com/FloThinksPi/cf-api-openapi-poc) | Manual + AI-assisted conversion → OpenAPI 3.1.0 | POC (July 2025) |
-| [SAP OpenAPI contribution](https://github.com/sap-contributions/cloudfoundry-cloud-controller-v3-openapi) | Manual spec file | Stale (Nov 2023) |
-
-### CAPI V3 Client Libraries Across Languages
-
-| Library | Language | Maintained? | Notes |
-|---|---|---|---|
-| [go-cfclient](https://github.com/cloudfoundry/go-cfclient) | Go | Yes (official, `cloudfoundry` org) | Hand-written, v3.0.0-alpha.20, recommended by this RFC |
-| [cf-java-client](https://github.com/cloudfoundry/cf-java-client) | Java | Yes (official, `cloudfoundry` org) | Hand-written, Reactor Netty-based, 330 stars |
-| [cf-python-client](https://github.com/cloudfoundry-community/cf-python-client) | Python | Yes (community) | Hand-written, 55 stars |
-| [capi-openapi-go-client](https://github.com/cloudfoundry-community/capi-openapi-go-client) | Go | Active (community) | Generated from OpenAPI spec, less mature than go-cfclient |
-
-### Implications for Plugin Migration
-
-1. **Go plugins** can use go-cfclient (recommended) or cf-java-client is available for JVM-based plugins. Python plugins can use cf-python-client.
-
-2. **Polyglot gap.** The V3 RFC proposes JSON-RPC for polyglot plugin support, but plugin authors in languages beyond Go, Java, and Python have no CAPI client SDK today. An official OpenAPI spec would enable generated clients in any language via standard code generators (openapi-generator, oapi-codegen, etc.).
-
-3. **The `capi-openapi-spec` project under `cloudfoundry-community`** is the most promising path toward an official machine-readable spec. If it matures and is adopted by the CF Foundation, it would significantly strengthen the polyglot plugin story by enabling auto-generated CAPI clients in any language.
-
-4. **This RFC recommends go-cfclient** as the companion library for Go plugins. The OpenAPI-generated client is an alternative but lacks go-cfclient's convenience methods (polling, eager loading, `Single`/`First` helpers). As both mature, a future recommendation update may be warranted.
-
 ## References
 
-- [CLI Plugin Interface V3 RFC](rfc-draft-cli-plugin-interface-v3.md) — The main RFC defining the new plugin interface
-- [Plugin Survey — Rabobank Case Study](plugin-survey.md#case-study-rabobank-guest-side-transitional-wrapper) — Detailed analysis of the Rabobank transitional wrapper
+- [Plugin Survey](plugin-survey.md) — Survey of 18 actively maintained CF CLI plugins and Rabobank case study
+- [cf-plugin-migrate Design](cf-plugin-migrate-design.md) — Detailed design decisions for the migration tool
 - [Rabobank cf-plugins](https://github.com/rabobank/cf-plugins) — The production transitional wrapper library
 - [CAPI V3 API Documentation](https://v3-apidocs.cloudfoundry.org) — Official Cloud Foundry V3 API reference
 - [CAPI V2 API Documentation](https://v2-apidocs.cloudfoundry.org) — Legacy Cloud Foundry V2 API reference (deprecated)
@@ -1855,6 +1661,6 @@ As a result, all existing CAPI client libraries — Go, Java, Python — are **h
 - [go-cfclient](https://github.com/cloudfoundry/go-cfclient) — Cloud Foundry V3 Go client library
 - [cf-java-client](https://github.com/cloudfoundry/cf-java-client) — Cloud Foundry Java client library
 - [cf-python-client](https://github.com/cloudfoundry-community/cf-python-client) — Cloud Foundry Python client library
-- [capi-openapi-spec](https://github.com/cloudfoundry-community/capi-openapi-spec) — Community-maintained OpenAPI 3.0.0 spec for CAPI V3
+- [capi-openapi-spec](https://github.com/cloudfoundry-community/capi-openapi-spec) — Community-maintained OpenAPI spec for CAPI V3
 - [cloud_controller_ng#2192](https://github.com/cloudfoundry/cloud_controller_ng/issues/2192) — Tracking issue for official CAPI OpenAPI spec
-- [cloudfoundry/cli#3621](https://github.com/cloudfoundry/cli/issues/3621) — New Plugin Interface tracking issue
+- [cloudfoundry/cli#3621](https://github.com/cloudfoundry/cli/issues/3621) — Plugin interface tracking issue

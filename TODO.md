@@ -98,6 +98,15 @@
 - [ ] Collect feedback during public discussion period
 - [ ] Request Final Comment Period (FCP)
 
+## Plugin Host-Code Coupling Analysis
+
+- [ ] Audit all 18 surveyed plugins for direct imports of CF CLI host-side packages (`code.cloudfoundry.org/cli/...` beyond `plugin` and `plugin/models`). Any import of CLI internals creates tight coupling that breaks if the CLI refactors or removes those packages.
+  - [x] cf-targets-plugin — imports `cli/cf/configuration`, `cli/cf/configuration/confighelpers`, `cli/cf/configuration/coreconfig` to read/write CLI config files directly. Bypasses plugin interface entirely.
+  - [ ] Remaining 17 plugins — need analysis
+- [ ] Create GitHub issues for plugins with host-code coupling
+- [ ] Create Jira tickets for tracking host-code coupling remediation
+- [ ] Document coupling patterns in the transitional migration RFC (audience: managers/reviewers need to understand the blast radius of CLI internal changes)
+
 ## Future RFCs (Out of Scope)
 
 - [ ] Polyglot plugin support (gRPC-based plugin model)
