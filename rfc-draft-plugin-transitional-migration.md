@@ -109,6 +109,10 @@ The [Rabobank cf-plugins](https://github.com/rabobank/cf-plugins) library has be
 - V3 API calls happen guest-side, so `CF_TRACE` does not capture them by default. The `cftrace` companion package restores this debugging capability.
 - Some V2 concepts have no direct V3 equivalent (e.g., app `ports` → route destinations). These require manual redesign rather than generated wrappers.
 
+### Relationship to a New Plugin Interface
+
+This RFC addresses the immediate V2 end-of-life risk using the existing plugin interface. A separate future RFC will propose a modernized plugin interface with a minimal stable contract, polyglot language support, and improved help and versioning metadata.
+
 ## References
 
 - [RFC-0032 — CF API V2 End of Life](https://github.com/cloudfoundry/community/blob/main/toc/rfc/rfc-0032-cfapiv2-eol.md)
