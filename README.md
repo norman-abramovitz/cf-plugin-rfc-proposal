@@ -12,8 +12,9 @@ directly. This RFC formalizes that pattern as the new plugin interface.
 
 ## Documents
 
-- [RFC Draft: CLI Plugin Interface V3](rfc-draft-cli-plugin-interface-v3.md)
-- [Transitional Migration Guide](rfc-draft-plugin-transitional-migration.md) — Guest-side migration approach (no host changes required)
+- [RFC Draft: CLI Plugin Interface V3](rfc-draft-cli-plugin-interface-v3-detailed.md) — Full technical specification
+- [RFC Draft: Transitional Migration](rfc-draft-plugin-transitional-migration.md) — Community-submission RFC (concise)
+- [Transitional Migration — Detailed Design](rfc-draft-plugin-transitional-migration-detailed.md) — Full technical specification with code examples and field mappings
 - [Plugin Survey](plugin-survey.md) — Analysis of 18 actively maintained CF CLI plugins
 - [CLI Plugin Interface TODO](cli-plugin-interface-todo.md) — What needs to change in the CLI codebase
 - [TODO](TODO.md) — Overall RFC work items

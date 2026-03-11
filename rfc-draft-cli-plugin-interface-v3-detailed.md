@@ -584,7 +584,7 @@ While a full plugin repository redesign is outside the scope of this RFC, the fo
 
 #### Phase 0: Transitional Migration (Available Now)
 
-Plugin developers SHOULD begin migrating from V2 domain methods to direct CAPI V3 access immediately, without waiting for host changes. A guest-side companion package wraps the existing `plugin.CliConnection` and provides a pre-configured go-cfclient V3 client constructed from `AccessToken()`, `ApiEndpoint()`, and `IsSSLDisabled()`. This approach requires **no host changes** and works with any existing CF CLI version. See the [Transitional Migration Guide](rfc-draft-plugin-transitional-migration.md) for step-by-step instructions and code examples.
+Plugin developers SHOULD begin migrating from V2 domain methods to direct CAPI V3 access immediately, without waiting for host changes. A guest-side companion package wraps the existing `plugin.CliConnection` and provides a pre-configured go-cfclient V3 client constructed from `AccessToken()`, `ApiEndpoint()`, and `IsSSLDisabled()`. This approach requires **no host changes** and works with any existing CF CLI version. See the [Transitional Migration Guide](rfc-draft-plugin-transitional-migration-detailed.md) for step-by-step instructions and code examples.
 
 The Rabobank [`cf-plugins`](https://github.com/rabobank/cf-plugins) library has validated this pattern in production since 2025 (see [plugin survey case study](plugin-survey.md#case-study-rabobank-guest-side-transitional-wrapper)).
 
@@ -765,7 +765,7 @@ func (p *MyPlugin) Run(ctx pluginapi.PluginContext, args []string) {
 
 ### Related Documents
 
-- [Transitional Migration Guide](rfc-draft-plugin-transitional-migration.md) — Guest-side migration approach requiring no host changes (Phase 0)
+- [Transitional Migration Guide](rfc-draft-plugin-transitional-migration-detailed.md) — Guest-side migration approach requiring no host changes (Phase 0)
 - [Rabobank cf-plugins](https://github.com/rabobank/cf-plugins) — Production transitional wrapper library validating the Phase 0 approach
 
 ### CF CLI Wiki Guides

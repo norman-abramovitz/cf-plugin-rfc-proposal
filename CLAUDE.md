@@ -10,8 +10,9 @@ This repository contains an RFC proposal to modernize the Cloud Foundry CLI plug
 
 | File | Purpose |
 |------|---------|
-| `rfc-draft-cli-plugin-interface-v3.md` | The main RFC document. Follows the [CF community RFC template](https://github.com/cloudfoundry/community/tree/main/tobs). Sections: Meta, Summary, Problem, Proposal, References. |
-| `rfc-draft-plugin-transitional-migration.md` | Transitional migration guide — guest-side approach requiring no host changes. Step-by-step instructions, code examples, companion package design. |
+| `rfc-draft-cli-plugin-interface-v3-detailed.md` | Full technical specification for the V3 plugin interface. Sections: Meta, Summary, Problem, Proposal, References. |
+| `rfc-draft-plugin-transitional-migration.md` | Community-submission RFC for transitional migration — concise, follows CF RFC template format. |
+| `rfc-draft-plugin-transitional-migration-detailed.md` | Full technical specification for transitional migration — code examples, field mappings, worked examples, companion package design. |
 | `plugin-survey.md` | Survey of 18 actively maintained CF CLI plugins — how they use the plugin interface, workarounds, and migration patterns. Includes Rabobank case study. |
 | `cli-plugin-interface-todo.md` | Detailed implementation plan for changes needed in the CF CLI codebase (`cloudfoundry/cli`). Organized by phases (1–6). |
 | `TODO.md` | High-level work item tracker — research, decisions, stakeholder review, reference implementation, community process. |
