@@ -109,9 +109,13 @@ The [Rabobank cf-plugins](https://github.com/rabobank/cf-plugins) library has be
 - V3 API calls happen guest-side, so `CF_TRACE` does not capture them by default. The `cftrace` companion package restores this debugging capability.
 - Some V2 concepts have no direct V3 equivalent (e.g., app `ports` → route destinations). These require manual redesign rather than generated wrappers.
 
+### Why Guest-Side?
+
+Plugin teams that have already migrated — including [App Autoscaler](https://github.com/cloudfoundry/app-autoscaler-cli-plugin/pull/132), [MultiApps](https://github.com/cloudfoundry/cli/issues/3621#issuecomment-3811806007), and [Rabobank](https://github.com/rabobank/cf-plugins) — converged independently on the same architecture: the CLI provides authentication and context, plugins interact with CAPI V3 directly. A host-side alternative — updating the CLI's RPC handlers to back V2 methods with V3 internally — would require no plugin changes but would perpetuate the coupling between plugins and CLI internals. The guest-side approach gives plugin teams migration autonomy with no cross-team dependency.
+
 ### Relationship to a New Plugin Interface
 
-This RFC addresses the immediate V2 end-of-life risk using the existing plugin interface. A separate future RFC will propose a modernized plugin interface with a minimal stable contract, polyglot language support, and improved help and versioning metadata.
+This RFC addresses the immediate V2 end-of-life risk using the existing plugin interface and works with any current CLI version (v7, v8, v9). A separate future RFC will propose a modernized plugin interface (targeting v9+) with a minimal stable contract, polyglot language support, and improved help and versioning metadata.
 
 ## References
 
