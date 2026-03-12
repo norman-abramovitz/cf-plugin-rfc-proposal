@@ -115,7 +115,7 @@ Plugin teams that have already migrated — including [App Autoscaler](https://g
 
 ### Relationship to a New Plugin Interface
 
-This RFC addresses the immediate V2 end-of-life risk using the existing plugin interface and works with any current CLI version (v7, v8, v9). A separate future RFC will propose a modernized plugin interface (targeting v9+) with a minimal stable contract, polyglot language support, and improved help and versioning metadata.
+This RFC addresses the immediate V2 end-of-life risk using the existing plugin interface and works with any current CLI version (v7, v8). A separate future RFC will propose a modernized plugin interface targeting v9 and later with a minimal stable contract, polyglot language support, backward compatibility, and improved help and versioning metadata.
 
 ## References
 
