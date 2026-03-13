@@ -12,7 +12,7 @@ import (
 
 // WriteYAML writes the scan result as a cf-plugin-migrate.yml file.
 func (r *ScanResult) WriteYAML(w io.Writer) error {
-	if len(r.Methods) == 0 && len(r.CliCommandCalls) == 0 && len(r.InternalImports) == 0 {
+	if len(r.Methods) == 0 && len(r.CliCommandCalls) == 0 && len(r.InternalImports) == 0 && len(r.DiscoveredEndpoints) == 0 {
 		checkWriteErr(fmt.Fprintln(w, "# No V2 domain method calls found."))
 		return nil
 	}
@@ -179,6 +179,38 @@ func (r *ScanResult) WriteYAML(w io.Writer) error {
 		}
 	}
 
+	// discovered_endpoints section — all API endpoint string literals found in source
+	if len(r.DiscoveredEndpoints) > 0 {
+		root.Content = append(root.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "discovered_endpoints"},
+		)
+
+		epSeq := &yaml.Node{Kind: yaml.SequenceNode}
+		root.Content = append(root.Content, epSeq)
+
+		for _, ep := range r.DiscoveredEndpoints {
+			entry := &yaml.Node{Kind: yaml.MappingNode}
+			epSeq.Content = append(epSeq.Content, entry)
+
+			addScalar(entry, "endpoint", ep.Endpoint)
+			addScalar(entry, "file", ep.File)
+			addScalar(entry, "line", fmt.Sprintf("%d", ep.Line))
+			addScalar(entry, "function", ep.Function)
+			if ep.Sink != "" {
+				addScalar(entry, "sink", ep.Sink)
+			}
+			if ep.V3Endpoint != "" {
+				addScalar(entry, "v3_endpoint", ep.V3Endpoint)
+			}
+			if ep.V3Notes != "" {
+				addScalar(entry, "v3_notes", ep.V3Notes)
+			}
+			if ep.Traced {
+				addScalar(entry, "traced", "true")
+			}
+		}
+	}
+
 	enc := yaml.NewEncoder(w)
 	enc.SetIndent(2)
 	if err := enc.Encode(doc); err != nil {
@@ -189,7 +221,7 @@ func (r *ScanResult) WriteYAML(w io.Writer) error {
 
 // WriteSummary writes a human-readable summary of the scan to w.
 func (r *ScanResult) WriteSummary(w io.Writer) {
-	if len(r.Methods) == 0 && len(r.CliCommandCalls) == 0 && len(r.InternalImports) == 0 {
+	if len(r.Methods) == 0 && len(r.CliCommandCalls) == 0 && len(r.InternalImports) == 0 && len(r.DiscoveredEndpoints) == 0 {
 		checkWriteErr(fmt.Fprintln(w, "No V2 domain method calls found."))
 		return
 	}
@@ -316,6 +348,43 @@ func (r *ScanResult) WriteSummary(w io.Writer) {
 			}
 			checkWriteErr(fmt.Fprintln(w))
 		}
+	}
+
+	// Discovered API endpoint string literals
+	if len(r.DiscoveredEndpoints) > 0 {
+		// Count traced vs untraced for the header.
+		traced, untraced := 0, 0
+		for _, ep := range r.DiscoveredEndpoints {
+			if ep.Traced {
+				traced++
+			} else {
+				untraced++
+			}
+		}
+		checkWriteErr(fmt.Fprintf(w, "Discovered API endpoints (%d total, %d traced, %d untraced):\n",
+			len(r.DiscoveredEndpoints), traced, untraced))
+		checkWriteErr(fmt.Fprintln(w))
+
+		for _, ep := range r.DiscoveredEndpoints {
+			tracedMark := " "
+			if ep.Traced {
+				tracedMark = "✓"
+			}
+			v3 := ""
+			if ep.V3Endpoint != "" {
+				v3 = " → " + ep.V3Endpoint
+				if ep.V3Notes != "" {
+					v3 += " (" + ep.V3Notes + ")"
+				}
+			}
+			sink := ""
+			if ep.Sink != "" {
+				sink = " → " + ep.Sink + "()"
+			}
+			checkWriteErr(fmt.Fprintf(w, "  %s %s:%d\t%s\t%s%s%s\n",
+				tracedMark, ep.File, ep.Line, ep.Function, ep.Endpoint, v3, sink))
+		}
+		checkWriteErr(fmt.Fprintln(w))
 	}
 }
 

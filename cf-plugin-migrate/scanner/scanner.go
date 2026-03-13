@@ -13,10 +13,11 @@ import (
 
 // ScanResult holds the aggregated scan output.
 type ScanResult struct {
-	Package         string
-	Methods         map[string]*MethodResult
-	CliCommandCalls []*CliCommandCall
-	InternalImports []*InternalImport
+	Package             string
+	Methods             map[string]*MethodResult
+	CliCommandCalls     []*CliCommandCall
+	InternalImports     []*InternalImport
+	DiscoveredEndpoints []*DiscoveredEndpoint
 }
 
 // InternalImport records a CLI internal package import detected in guest code.
@@ -70,6 +71,9 @@ func Scan(patterns []string) (*ScanResult, error) {
 
 	// Second pass: resolve dynamic curl endpoints through wrapper functions.
 	resolveCurlEndpoints(parsed, result)
+
+	// Third pass: discover all API endpoint string literals in the source.
+	discoverEndpoints(parsed, result)
 
 	return result, nil
 }
