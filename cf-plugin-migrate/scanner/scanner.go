@@ -50,17 +50,26 @@ func Scan(patterns []string) (*ScanResult, error) {
 		Methods: make(map[string]*MethodResult),
 	}
 
+	var parsed []*parsedFile
+
 	for _, pattern := range patterns {
 		files, err := resolvePattern(pattern)
 		if err != nil {
 			return nil, err
 		}
 		for _, file := range files {
-			if err := scanFile(file, result); err != nil {
+			pf, err := scanFile(file, result)
+			if err != nil {
 				return nil, fmt.Errorf("scanning %s: %w", file, err)
+			}
+			if pf != nil {
+				parsed = append(parsed, pf)
 			}
 		}
 	}
+
+	// Second pass: resolve dynamic curl endpoints through wrapper functions.
+	resolveCurlEndpoints(parsed, result)
 
 	return result, nil
 }
@@ -107,12 +116,14 @@ func findGoFilesInDir(dir string) ([]string, error) {
 	return files, nil
 }
 
-func scanFile(path string, result *ScanResult) error {
+func scanFile(path string, result *ScanResult) (*parsedFile, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, path, nil, 0)
 	if err != nil {
-		return err
+		return nil, err
 	}
+
+	pf := &parsedFile{path: path, fset: fset, file: f}
 
 	if result.Package == "" {
 		result.Package = f.Name.Name
@@ -150,7 +161,7 @@ func scanFile(path string, result *ScanResult) error {
 		scanFunctionForCliCommands(fset, path, fn, result)
 	}
 
-	return nil
+	return pf, nil
 }
 
 // rangeInfo tracks a range variable's origin.

@@ -25,6 +25,10 @@ type CliCommandCall struct {
 	Fields      map[string]bool // field paths accessed on the target/range variables
 	V3Endpoint  string          // suggested V3 equivalent
 	V3Notes     string          // migration notes
+
+	// ResolvedEndpoints holds endpoints found by tracing the URL parameter
+	// backwards through wrapper functions to the original string literals.
+	ResolvedEndpoints []ResolvedEndpoint
 }
 
 // V2Endpoint holds the V3 equivalent for a V2 API path.

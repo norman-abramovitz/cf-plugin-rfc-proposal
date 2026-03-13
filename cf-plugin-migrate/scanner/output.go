@@ -128,6 +128,29 @@ func (r *ScanResult) WriteYAML(w io.Writer) error {
 						buildFlowSequence(sortedKeys(cc.Fields)),
 					)
 				}
+
+				// Resolved endpoints from cross-function tracing
+				if len(cc.ResolvedEndpoints) > 0 {
+					entry.Content = append(entry.Content,
+						&yaml.Node{Kind: yaml.ScalarNode, Value: "resolved_endpoints"},
+					)
+					epSeq := &yaml.Node{Kind: yaml.SequenceNode}
+					entry.Content = append(entry.Content, epSeq)
+					for _, ep := range cc.ResolvedEndpoints {
+						epEntry := &yaml.Node{Kind: yaml.MappingNode}
+						epSeq.Content = append(epSeq.Content, epEntry)
+						addScalar(epEntry, "endpoint", ep.Endpoint)
+						addScalar(epEntry, "file", ep.File)
+						addScalar(epEntry, "line", fmt.Sprintf("%d", ep.Line))
+						addScalar(epEntry, "caller", ep.Caller)
+						if ep.V3Endpoint != "" {
+							addScalar(epEntry, "v3_endpoint", ep.V3Endpoint)
+						}
+						if ep.V3Notes != "" {
+							addScalar(epEntry, "v3_notes", ep.V3Notes)
+						}
+					}
+				}
 			}
 		}
 	}
@@ -255,6 +278,22 @@ func (r *ScanResult) WriteSummary(w io.Writer) {
 				if len(cc.Fields) > 0 {
 					fields := sortedKeys(cc.Fields)
 					checkWriteErr(fmt.Fprintf(w, "    → Fields used: %s\n", strings.Join(fields, ", ")))
+				}
+
+				// Resolved endpoints from cross-function tracing
+				if len(cc.ResolvedEndpoints) > 0 {
+					checkWriteErr(fmt.Fprintf(w, "    Resolved endpoints (%d callers traced):\n", len(cc.ResolvedEndpoints)))
+					for _, ep := range cc.ResolvedEndpoints {
+						v3 := ""
+						if ep.V3Endpoint != "" {
+							v3 = " → " + ep.V3Endpoint
+							if ep.V3Notes != "" {
+								v3 += " (" + ep.V3Notes + ")"
+							}
+						}
+						checkWriteErr(fmt.Fprintf(w, "      %s:%d\t%s\t%s%s\n",
+							ep.File, ep.Line, ep.Caller, ep.Endpoint, v3))
+					}
 				}
 			}
 			checkWriteErr(fmt.Fprintln(w))

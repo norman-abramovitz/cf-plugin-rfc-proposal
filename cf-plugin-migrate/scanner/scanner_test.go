@@ -1471,6 +1471,289 @@ func runCommand(conn CLI) ([]string, error) {
 	}
 }
 
+// scanSources creates temp files from multiple Go source strings, scans them, and returns the result.
+func scanSources(t *testing.T, sources map[string]string) *ScanResult {
+	t.Helper()
+	dir := t.TempDir()
+	for name, src := range sources {
+		writeTestFile(t, dir, name, src)
+	}
+	result, err := Scan([]string{dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+// --- Cross-function endpoint resolution tests ---
+
+func TestResolveCurlEndpointThroughWrapper(t *testing.T) {
+	// Pattern: callCurl wraps CliCommand("curl", url), and a caller passes a literal.
+	result := scanSources(t, map[string]string{
+		"wrapper.go": `package foo
+
+func callCurl(conn CLI, url string) ([]string, error) {
+	return conn.CliCommandWithoutTerminalOutput("curl", url)
+}
+`,
+		"caller.go": `package foo
+
+func doWork(conn CLI) {
+	callCurl(conn, "/v2/apps")
+}
+`,
+	})
+
+	if len(result.CliCommandCalls) != 1 {
+		t.Fatalf("expected 1 curl call, got %d", len(result.CliCommandCalls))
+	}
+	cc := result.CliCommandCalls[0]
+	if len(cc.ResolvedEndpoints) != 1 {
+		t.Fatalf("expected 1 resolved endpoint, got %d", len(cc.ResolvedEndpoints))
+	}
+	ep := cc.ResolvedEndpoints[0]
+	if ep.Endpoint != "/v2/apps" {
+		t.Errorf("expected /v2/apps, got %q", ep.Endpoint)
+	}
+	if ep.Caller != "doWork" {
+		t.Errorf("expected caller doWork, got %q", ep.Caller)
+	}
+	if ep.V3Endpoint != "/v3/apps" {
+		t.Errorf("expected V3 endpoint /v3/apps, got %q", ep.V3Endpoint)
+	}
+}
+
+func TestResolveCurlEndpointTwoLevelWrapper(t *testing.T) {
+	// Pattern: callCurl → callCurlRetryable → CallAPI → actual caller
+	result := scanSources(t, map[string]string{
+		"api.go": `package foo
+
+func callCurl(conn CLI, url string) ([]string, error) {
+	return conn.CliCommandWithoutTerminalOutput("curl", url)
+}
+
+func callCurlRetryable(conn CLI, url string) ([]string, error) {
+	return callCurl(conn, url)
+}
+
+func CallAPI(conn CLI, url string) ([]string, error) {
+	return callCurlRetryable(conn, url)
+}
+`,
+		"caller.go": `package foo
+
+func fetchSpaces(conn CLI) {
+	CallAPI(conn, "/v2/spaces")
+}
+
+func fetchOrgs(conn CLI) {
+	CallAPI(conn, "/v2/organizations")
+}
+`,
+	})
+
+	if len(result.CliCommandCalls) != 1 {
+		t.Fatalf("expected 1 curl call, got %d", len(result.CliCommandCalls))
+	}
+	cc := result.CliCommandCalls[0]
+	if len(cc.ResolvedEndpoints) != 2 {
+		t.Fatalf("expected 2 resolved endpoints, got %d", len(cc.ResolvedEndpoints))
+	}
+
+	endpoints := make(map[string]string) // endpoint → caller
+	for _, ep := range cc.ResolvedEndpoints {
+		endpoints[ep.Endpoint] = ep.Caller
+	}
+	if endpoints["/v2/spaces"] != "fetchSpaces" {
+		t.Errorf("expected /v2/spaces from fetchSpaces, got caller %q", endpoints["/v2/spaces"])
+	}
+	if endpoints["/v2/organizations"] != "fetchOrgs" {
+		t.Errorf("expected /v2/organizations from fetchOrgs, got caller %q", endpoints["/v2/organizations"])
+	}
+}
+
+func TestResolveCurlEndpointWithFmtSprintf(t *testing.T) {
+	// Pattern: caller passes fmt.Sprintf("/v2/routes/%v/apps", routeId)
+	result := scanSources(t, map[string]string{
+		"api.go": `package foo
+
+func callCurl(conn CLI, url string) ([]string, error) {
+	return conn.CliCommandWithoutTerminalOutput("curl", url)
+}
+`,
+		"caller.go": `package foo
+
+import "fmt"
+
+func fetchRouteApps(conn CLI, routeId string) {
+	url := fmt.Sprintf("/v2/routes/%v/apps", routeId)
+	callCurl(conn, url)
+}
+`,
+	})
+
+	if len(result.CliCommandCalls) != 1 {
+		t.Fatalf("expected 1 curl call, got %d", len(result.CliCommandCalls))
+	}
+	cc := result.CliCommandCalls[0]
+	if len(cc.ResolvedEndpoints) != 1 {
+		t.Fatalf("expected 1 resolved endpoint, got %d", len(cc.ResolvedEndpoints))
+	}
+	ep := cc.ResolvedEndpoints[0]
+	if ep.Endpoint != "/v2/routes/%v/apps" {
+		t.Errorf("expected /v2/routes/%%v/apps, got %q", ep.Endpoint)
+	}
+	if ep.V3Endpoint != "/v3/routes" {
+		t.Errorf("expected V3 /v3/routes, got %q", ep.V3Endpoint)
+	}
+}
+
+func TestResolveCurlEndpointParamAlias(t *testing.T) {
+	// Pattern: intermediate function aliases the parameter: nextUrl := url
+	result := scanSources(t, map[string]string{
+		"api.go": `package foo
+
+func callCurl(conn CLI, url string) ([]string, error) {
+	return conn.CliCommandWithoutTerminalOutput("curl", url)
+}
+
+func CallPagableAPI(conn CLI, url string) {
+	nextUrl := url
+	callCurl(conn, nextUrl)
+}
+`,
+		"caller.go": `package foo
+
+func fetchApps(conn CLI) {
+	CallPagableAPI(conn, "/v2/apps")
+}
+`,
+	})
+
+	if len(result.CliCommandCalls) != 1 {
+		t.Fatalf("expected 1 curl call, got %d", len(result.CliCommandCalls))
+	}
+	cc := result.CliCommandCalls[0]
+	if len(cc.ResolvedEndpoints) != 1 {
+		t.Fatalf("expected 1 resolved endpoint, got %d", len(cc.ResolvedEndpoints))
+	}
+	if cc.ResolvedEndpoints[0].Endpoint != "/v2/apps" {
+		t.Errorf("expected /v2/apps, got %q", cc.ResolvedEndpoints[0].Endpoint)
+	}
+}
+
+func TestResolveCurlNoEndpointWhenLocalVar(t *testing.T) {
+	// When the endpoint variable is a local variable (not a parameter),
+	// cross-function resolution shouldn't produce resolved endpoints.
+	result := scanSources(t, map[string]string{
+		"main.go": `package foo
+
+func example(conn CLI) {
+	url := "/v2/apps"
+	output, _ := conn.CliCommandWithoutTerminalOutput("curl", url)
+	_ = output
+}
+`,
+	})
+
+	if len(result.CliCommandCalls) != 1 {
+		t.Fatalf("expected 1 curl call, got %d", len(result.CliCommandCalls))
+	}
+	cc := result.CliCommandCalls[0]
+	// The endpoint should be resolved locally, not via cross-function tracing.
+	if cc.Endpoint != "/v2/apps" {
+		t.Errorf("expected local resolution to /v2/apps, got %q", cc.Endpoint)
+	}
+	if len(cc.ResolvedEndpoints) != 0 {
+		t.Errorf("expected 0 cross-function resolved endpoints, got %d", len(cc.ResolvedEndpoints))
+	}
+}
+
+func TestResolveCurlEndpointYAMLOutput(t *testing.T) {
+	result := &ScanResult{
+		Package: "foo",
+		Methods: make(map[string]*MethodResult),
+		CliCommandCalls: []*CliCommandCall{
+			{
+				File:        "api.go",
+				Line:        10,
+				Method:      "CliCommandWithoutTerminalOutput",
+				Command:     "curl",
+				EndpointVar: "url",
+				Fields:      make(map[string]bool),
+				ResolvedEndpoints: []ResolvedEndpoint{
+					{
+						Endpoint:   "/v2/apps",
+						File:       "caller.go",
+						Line:       20,
+						Caller:     "fetchApps",
+						V3Endpoint: "/v3/apps",
+						V3Notes:    "V2 entity/metadata envelope → V3 flat resources",
+					},
+				},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := result.WriteYAML(&buf); err != nil {
+		t.Fatal(err)
+	}
+
+	yaml := buf.String()
+	for _, want := range []string{
+		"resolved_endpoints:",
+		"endpoint: /v2/apps",
+		"caller: fetchApps",
+		"v3_endpoint: /v3/apps",
+	} {
+		if !strings.Contains(yaml, want) {
+			t.Errorf("YAML missing %q:\n%s", want, yaml)
+		}
+	}
+}
+
+func TestResolveCurlEndpointSummaryOutput(t *testing.T) {
+	result := &ScanResult{
+		Package: "foo",
+		Methods: make(map[string]*MethodResult),
+		CliCommandCalls: []*CliCommandCall{
+			{
+				File:        "api.go",
+				Line:        10,
+				Method:      "CliCommandWithoutTerminalOutput",
+				Command:     "curl",
+				EndpointVar: "url",
+				Fields:      make(map[string]bool),
+				ResolvedEndpoints: []ResolvedEndpoint{
+					{
+						Endpoint:   "/v2/spaces",
+						File:       "caller.go",
+						Line:       30,
+						Caller:     "fetchSpaces",
+						V3Endpoint: "/v3/spaces",
+					},
+				},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	result.WriteSummary(&buf)
+	out := buf.String()
+
+	for _, want := range []string{
+		"Resolved endpoints",
+		"/v2/spaces",
+		"fetchSpaces",
+		"/v3/spaces",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("summary missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestScanGetAppsRangeWithIndex(t *testing.T) {
 	// Range with index variable: for i, app := range apps
 	source := `package foo
