@@ -9,10 +9,16 @@ type InternalImportReplacement struct {
 }
 
 // InternalImportReplacements maps known CLI internal import paths to replacement suggestions.
-// Both old (code.cloudfoundry.org/cli/cf/...) and new (code.cloudfoundry.org/cli/v8/cf/...)
-// import path variants are included.
+// Three import path variants are included:
+//   - Old github.com path (github.com/cloudfoundry/cli/cf/...) — pre-modules plugins
+//   - Module path (code.cloudfoundry.org/cli/cf/...) — v7-era plugins
+//   - v8+ path (code.cloudfoundry.org/cli/v8/cf/...) — v8-era plugins
 var InternalImportReplacements = map[string]InternalImportReplacement{
 	// cf/configuration/confighelpers
+	"github.com/cloudfoundry/cli/cf/configuration/confighelpers": {
+		Replacement: "code.cloudfoundry.org/cf-plugin-helpers/cfconfig",
+		Note:        "DefaultFilePath(), PluginRepoDir() — import swap, no code changes",
+	},
 	"code.cloudfoundry.org/cli/cf/configuration/confighelpers": {
 		Replacement: "code.cloudfoundry.org/cf-plugin-helpers/cfconfig",
 		Note:        "DefaultFilePath(), PluginRepoDir() — import swap, no code changes",
@@ -23,6 +29,10 @@ var InternalImportReplacements = map[string]InternalImportReplacement{
 	},
 
 	// cf/trace
+	"github.com/cloudfoundry/cli/cf/trace": {
+		Replacement: "code.cloudfoundry.org/cf-plugin-helpers/cftrace",
+		Note:        "Printer, NewLogger(), NewWriterPrinter() — import swap, no code changes",
+	},
 	"code.cloudfoundry.org/cli/cf/trace": {
 		Replacement: "code.cloudfoundry.org/cf-plugin-helpers/cftrace",
 		Note:        "Printer, NewLogger(), NewWriterPrinter() — import swap, no code changes",
@@ -33,6 +43,10 @@ var InternalImportReplacements = map[string]InternalImportReplacement{
 	},
 
 	// cf/terminal
+	"github.com/cloudfoundry/cli/cf/terminal": {
+		Replacement: "code.cloudfoundry.org/cf-plugin-helpers/cfui",
+		Note:        "UI, TeePrinter, NewUI, color functions — import swap for Pattern B (UI bootstrap); Pattern A (full framework, 16+ files) may need additional work",
+	},
 	"code.cloudfoundry.org/cli/cf/terminal": {
 		Replacement: "code.cloudfoundry.org/cf-plugin-helpers/cfui",
 		Note:        "UI, TeePrinter, NewUI, color functions — import swap for Pattern B (UI bootstrap); Pattern A (full framework, 16+ files) may need additional work",
@@ -43,6 +57,10 @@ var InternalImportReplacements = map[string]InternalImportReplacement{
 	},
 
 	// cf/formatters
+	"github.com/cloudfoundry/cli/cf/formatters": {
+		Replacement: "code.cloudfoundry.org/cf-plugin-helpers/cfformat",
+		Note:        "ByteSize() — import swap, no code changes",
+	},
 	"code.cloudfoundry.org/cli/cf/formatters": {
 		Replacement: "code.cloudfoundry.org/cf-plugin-helpers/cfformat",
 		Note:        "ByteSize() — import swap, no code changes",
@@ -53,6 +71,10 @@ var InternalImportReplacements = map[string]InternalImportReplacement{
 	},
 
 	// cf/i18n — transitive dependency of cf/terminal
+	"github.com/cloudfoundry/cli/cf/i18n": {
+		Replacement: "",
+		Note:        "Transitive dependency of cf/terminal — removing terminal eliminates this import",
+	},
 	"code.cloudfoundry.org/cli/cf/i18n": {
 		Replacement: "",
 		Note:        "Transitive dependency of cf/terminal — removing terminal eliminates this import",
@@ -63,6 +85,10 @@ var InternalImportReplacements = map[string]InternalImportReplacement{
 	},
 
 	// cf/flags
+	"github.com/cloudfoundry/cli/cf/flags": {
+		Replacement: "",
+		Note:        "Replace with stdlib flag or pflag",
+	},
 	"code.cloudfoundry.org/cli/cf/flags": {
 		Replacement: "",
 		Note:        "Replace with stdlib flag or pflag",
@@ -73,11 +99,19 @@ var InternalImportReplacements = map[string]InternalImportReplacement{
 	},
 
 	// cf/configuration + coreconfig — hard case
+	"github.com/cloudfoundry/cli/cf/configuration": {
+		Replacement: "",
+		Note:        "Direct config file access — no drop-in replacement. See RFC for options: copy code, keep import, or request CLI team support",
+	},
 	"code.cloudfoundry.org/cli/cf/configuration": {
 		Replacement: "",
 		Note:        "Direct config file access — no drop-in replacement. See RFC for options: copy code, keep import, or request CLI team support",
 	},
 	"code.cloudfoundry.org/cli/v8/cf/configuration": {
+		Replacement: "",
+		Note:        "Direct config file access — no drop-in replacement. See RFC for options",
+	},
+	"github.com/cloudfoundry/cli/cf/configuration/coreconfig": {
 		Replacement: "",
 		Note:        "Direct config file access — no drop-in replacement. See RFC for options",
 	},
@@ -107,6 +141,8 @@ var InternalImportReplacements = map[string]InternalImportReplacement{
 func isAllowedImport(importPath string) bool {
 	// Exact matches for plugin and plugin/models (with or without v8 prefix)
 	allowed := []string{
+		"github.com/cloudfoundry/cli/plugin",
+		"github.com/cloudfoundry/cli/plugin/models",
 		"code.cloudfoundry.org/cli/plugin",
 		"code.cloudfoundry.org/cli/plugin/models",
 		"code.cloudfoundry.org/cli/v8/plugin",
