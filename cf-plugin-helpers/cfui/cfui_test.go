@@ -9,9 +9,14 @@ import (
 	"code.cloudfoundry.org/cf-plugin-helpers/cftrace"
 )
 
+func newTestUI(buf *bytes.Buffer) UI {
+	printer := NewTeePrinter(buf)
+	return NewUI(strings.NewReader(""), buf, printer, cftrace.NewWriterPrinter(io.Discard, false))
+}
+
 func TestSay(t *testing.T) {
 	var buf bytes.Buffer
-	u := NewUI(nil, &buf, nil, cftrace.NewWriterPrinter(io.Discard, false))
+	u := newTestUI(&buf)
 	u.Say("hello %s", "world")
 	if !strings.Contains(buf.String(), "hello world") {
 		t.Errorf("expected hello world, got %q", buf.String())
@@ -20,7 +25,7 @@ func TestSay(t *testing.T) {
 
 func TestSayNoArgs(t *testing.T) {
 	var buf bytes.Buffer
-	u := NewUI(nil, &buf, nil, cftrace.NewWriterPrinter(io.Discard, false))
+	u := newTestUI(&buf)
 	u.Say("simple message")
 	if !strings.Contains(buf.String(), "simple message") {
 		t.Errorf("expected simple message, got %q", buf.String())
@@ -32,7 +37,7 @@ func TestFailed(t *testing.T) {
 	defer func() { UserAskedForColors = "" }()
 
 	var buf bytes.Buffer
-	u := NewUI(nil, &buf, nil, cftrace.NewWriterPrinter(io.Discard, false))
+	u := newTestUI(&buf)
 	u.Failed("something went wrong")
 	output := buf.String()
 	if !strings.Contains(output, "FAILED") {
@@ -48,7 +53,7 @@ func TestOk(t *testing.T) {
 	defer func() { UserAskedForColors = "" }()
 
 	var buf bytes.Buffer
-	u := NewUI(nil, &buf, nil, cftrace.NewWriterPrinter(io.Discard, false))
+	u := newTestUI(&buf)
 	u.Ok()
 	if !strings.Contains(buf.String(), "OK") {
 		t.Errorf("expected OK, got %q", buf.String())
@@ -57,7 +62,7 @@ func TestOk(t *testing.T) {
 
 func TestTable(t *testing.T) {
 	var buf bytes.Buffer
-	u := NewUI(nil, &buf, nil, cftrace.NewWriterPrinter(io.Discard, false))
+	u := newTestUI(&buf)
 	table := u.Table([]string{"Name", "State"})
 	table.Add("app1", "started")
 	table.Add("app2", "stopped")
@@ -119,6 +124,17 @@ func TestTeePrinter(t *testing.T) {
 	}
 }
 
+func TestTeePrinterPrintMethods(t *testing.T) {
+	var buf bytes.Buffer
+	p := NewTeePrinter(&buf)
+	p.Print("a")
+	p.Printf(" %s", "b")
+	p.Println(" c")
+	if !strings.Contains(buf.String(), "a b c") {
+		t.Errorf("expected 'a b c' in output, got %q", buf.String())
+	}
+}
+
 func TestInitColorSupport(t *testing.T) {
 	t.Setenv("CF_COLOR", "false")
 	UserAskedForColors = ""
@@ -132,9 +148,35 @@ func TestInitColorSupport(t *testing.T) {
 func TestNewUIWithTeePrinter(t *testing.T) {
 	var buf bytes.Buffer
 	printer := NewTeePrinter(&buf)
-	u := NewUI(nil, io.Discard, printer, cftrace.NewWriterPrinter(io.Discard, false))
+	u := NewUI(strings.NewReader(""), io.Discard, printer, cftrace.NewWriterPrinter(io.Discard, false))
 	u.Say("captured")
 	if !strings.Contains(printer.String(), "captured") {
 		t.Error("expected output captured by tee printer")
+	}
+}
+
+func TestPrinterInterface(t *testing.T) {
+	var p Printer = NewTeePrinter(io.Discard)
+	p.Print("test")
+	p.Printf("%s", "test")
+	p.Println("test")
+}
+
+func TestAsk(t *testing.T) {
+	var buf bytes.Buffer
+	printer := NewTeePrinter(&buf)
+	u := NewUI(strings.NewReader("yes\n"), &buf, printer, cftrace.NewWriterPrinter(io.Discard, false))
+	answer := u.Ask("Continue?")
+	if answer != "yes" {
+		t.Errorf("expected 'yes', got %q", answer)
+	}
+}
+
+func TestConfirm(t *testing.T) {
+	var buf bytes.Buffer
+	printer := NewTeePrinter(&buf)
+	u := NewUI(strings.NewReader("y\n"), &buf, printer, cftrace.NewWriterPrinter(io.Discard, false))
+	if !u.Confirm("OK?") {
+		t.Error("expected Confirm to return true for 'y'")
 	}
 }
