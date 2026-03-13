@@ -214,22 +214,34 @@ func scanFunction(fset *token.FileSet, path string, fn *ast.FuncDecl, result *Sc
 
 		case *ast.RangeStmt:
 			// Track: for _, x := range resultVar.Field
-			sel, ok := stmt.X.(*ast.SelectorExpr)
-			if !ok {
-				return true
+			if sel, ok := stmt.X.(*ast.SelectorExpr); ok {
+				ident, ok := sel.X.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				if _, tracked := resultVars[ident.Name]; !tracked {
+					return true
+				}
+				if stmt.Value != nil {
+					if valIdent, ok := stmt.Value.(*ast.Ident); ok {
+						rangeVars[valIdent.Name] = rangeInfo{
+							parentVar:   ident.Name,
+							parentField: sel.Sel.Name,
+						}
+					}
+				}
 			}
-			ident, ok := sel.X.(*ast.Ident)
-			if !ok {
-				return true
-			}
-			if _, tracked := resultVars[ident.Name]; !tracked {
-				return true
-			}
-			if stmt.Value != nil {
-				if valIdent, ok := stmt.Value.(*ast.Ident); ok {
-					rangeVars[valIdent.Name] = rangeInfo{
-						parentVar:   ident.Name,
-						parentField: sel.Sel.Name,
+			// Track: for _, x := range resultVar (plain slice)
+			// e.g., apps, _ := conn.GetApps(); for _, app := range apps
+			if ident, ok := stmt.X.(*ast.Ident); ok {
+				if _, tracked := resultVars[ident.Name]; tracked {
+					if stmt.Value != nil {
+						if valIdent, ok := stmt.Value.(*ast.Ident); ok {
+							rangeVars[valIdent.Name] = rangeInfo{
+								parentVar:   ident.Name,
+								parentField: "", // direct element, no parent field
+							}
+						}
 					}
 				}
 			}
@@ -265,10 +277,15 @@ func scanFunction(fset *token.FileSet, path string, fn *ast.FuncDecl, result *Sc
 		// Access on a range variable: route.Host, route.Domain.Name
 		if ri, ok := rangeVars[rootVar]; ok {
 			if method, ok := resultVars[ri.parentVar]; ok {
-				fieldPath := make([]string, 0, 1+len(chain)-1)
-				fieldPath = append(fieldPath, ri.parentField)
-				fieldPath = append(fieldPath, chain[1:]...)
-				recordFieldAccess(result, method, fieldPath)
+				if ri.parentField == "" {
+					// Plain slice range: field access is directly on the element
+					recordFieldAccess(result, method, chain[1:])
+				} else {
+					fieldPath := make([]string, 0, 1+len(chain)-1)
+					fieldPath = append(fieldPath, ri.parentField)
+					fieldPath = append(fieldPath, chain[1:]...)
+					recordFieldAccess(result, method, fieldPath)
+				}
 				return false
 			}
 		}

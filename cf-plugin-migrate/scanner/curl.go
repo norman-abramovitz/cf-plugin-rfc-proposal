@@ -137,6 +137,25 @@ func scanFunctionForCliCommands(fset *token.FileSet, path string, fn *ast.FuncDe
 				linkUnmarshal(rhs, curlOutputVars, curlTargetVars, varTypes)
 			}
 
+		case *ast.ReturnStmt:
+			// Check for CliCommand/CliCommandWithoutTerminalOutput in return statements:
+			// return cliConnection.CliCommandWithoutTerminalOutput("curl", url)
+			for _, expr := range stmt.Results {
+				if cc := extractCliCommandFromExpr(expr, fset, path, stmt.Pos()); cc != nil {
+					// Resolve endpoint variable from tracked string literals
+					if cc.Command == "curl" && cc.EndpointVar != "" && cc.Endpoint == "" {
+						if val, ok := stringVars[cc.EndpointVar]; ok {
+							cc.Endpoint = val
+							if v3, ok := lookupV3Endpoint(val); ok {
+								cc.V3Endpoint = v3.V3Path
+								cc.V3Notes = v3.Notes
+							}
+						}
+					}
+					calls = append(calls, cc)
+				}
+			}
+
 		case *ast.ExprStmt:
 			// Check for json.Unmarshal as bare expression statement
 			linkUnmarshal(stmt.X, curlOutputVars, curlTargetVars, varTypes)
@@ -213,7 +232,24 @@ func extractCliCommandCall(stmt *ast.AssignStmt, fset *token.FileSet, path strin
 	if len(stmt.Rhs) != 1 {
 		return nil
 	}
-	call, ok := stmt.Rhs[0].(*ast.CallExpr)
+	cc := extractCliCommandFromExpr(stmt.Rhs[0], fset, path, stmt.Pos())
+	if cc == nil {
+		return nil
+	}
+
+	// Extract result variable from the assignment LHS
+	if len(stmt.Lhs) >= 1 {
+		if ident, ok := stmt.Lhs[0].(*ast.Ident); ok {
+			cc.ResultVar = ident.Name
+		}
+	}
+
+	return cc
+}
+
+// extractCliCommandFromExpr checks if an expression is a CliCommand/CliCommandWithoutTerminalOutput call.
+func extractCliCommandFromExpr(expr ast.Expr, fset *token.FileSet, path string, pos token.Pos) *CliCommandCall {
+	call, ok := expr.(*ast.CallExpr)
 	if !ok {
 		return nil
 	}
@@ -229,16 +265,9 @@ func extractCliCommandCall(stmt *ast.AssignStmt, fset *token.FileSet, path strin
 
 	cc := &CliCommandCall{
 		File:   path,
-		Line:   fset.Position(stmt.Pos()).Line,
+		Line:   fset.Position(pos).Line,
 		Method: methodName,
 		Fields: make(map[string]bool),
-	}
-
-	// Extract result variable
-	if len(stmt.Lhs) >= 1 {
-		if ident, ok := stmt.Lhs[0].(*ast.Ident); ok {
-			cc.ResultVar = ident.Name
-		}
 	}
 
 	// Extract the command (first arg) and remaining args

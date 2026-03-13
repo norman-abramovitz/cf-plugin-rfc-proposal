@@ -597,8 +597,8 @@ func TestWriteSummaryGroupsUsed(t *testing.T) {
 
 func TestScanGetAppsRangeTracking(t *testing.T) {
 	// Verify range over a direct result variable (not a field).
-	// GetApps returns a slice — ranging directly over it is different
-	// from ranging over app.Routes (a field of the result).
+	// GetApps returns a slice — ranging directly over it tracks
+	// field access on each element.
 	source := `package foo
 
 func example(conn CLI) {
@@ -611,12 +611,15 @@ func example(conn CLI) {
 `
 	result := scanSource(t, source)
 
-	// apps is the result var, not a field — so ranging over it
-	// doesn't match the "range resultVar.Field" pattern.
-	// The scanner should still detect GetApps with a call site.
 	mr := requireMethod(t, result, "GetApps")
 	if len(mr.CallSites) != 1 {
 		t.Errorf("expected 1 call site, got %d", len(mr.CallSites))
+	}
+	if !mr.Fields["Name"] {
+		t.Error("expected Name field from range element")
+	}
+	if !mr.Fields["Guid"] {
+		t.Error("expected Guid field from range element")
 	}
 }
 
@@ -1416,5 +1419,75 @@ func TestWriteSummaryWriteError(t *testing.T) {
 	}
 	if !strings.Contains(captured.Error(), "simulated write failure") {
 		t.Errorf("unexpected error: %v", captured)
+	}
+}
+
+func TestCliCommandInReturnStmt(t *testing.T) {
+	// CliCommandWithoutTerminalOutput in a return statement should be detected.
+	// This matches the pattern in cloudfoundry-top-plugin/metadata/common/callApi.go:
+	//   return cliConnection.CliCommandWithoutTerminalOutput("curl", url)
+	source := `package foo
+
+func callCurl(conn CLI, url string) ([]string, error) {
+	return conn.CliCommandWithoutTerminalOutput("curl", url)
+}
+`
+	result := scanSource(t, source)
+
+	if len(result.CliCommandCalls) != 1 {
+		t.Fatalf("expected 1 curl call, got %d", len(result.CliCommandCalls))
+	}
+	cc := result.CliCommandCalls[0]
+	if cc.Method != "CliCommandWithoutTerminalOutput" {
+		t.Errorf("expected CliCommandWithoutTerminalOutput, got %q", cc.Method)
+	}
+	if cc.Command != "curl" {
+		t.Errorf("expected command curl, got %q", cc.Command)
+	}
+	if cc.EndpointVar != "url" {
+		t.Errorf("expected endpoint var url, got %q", cc.EndpointVar)
+	}
+	// No result var since it's in a return statement
+	if cc.ResultVar != "" {
+		t.Errorf("expected empty result var for return stmt, got %q", cc.ResultVar)
+	}
+}
+
+func TestCliCommandInReturnStmtNonCurl(t *testing.T) {
+	source := `package foo
+
+func runCommand(conn CLI) ([]string, error) {
+	return conn.CliCommand("apps")
+}
+`
+	result := scanSource(t, source)
+
+	if len(result.CliCommandCalls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(result.CliCommandCalls))
+	}
+	cc := result.CliCommandCalls[0]
+	if cc.Command != "apps" {
+		t.Errorf("expected command apps, got %q", cc.Command)
+	}
+}
+
+func TestScanGetAppsRangeWithIndex(t *testing.T) {
+	// Range with index variable: for i, app := range apps
+	source := `package foo
+
+import "fmt"
+
+func example(conn CLI) {
+	apps, _ := conn.GetApps()
+	for i, app := range apps {
+		fmt.Println(i, app.Name)
+	}
+}
+`
+	result := scanSource(t, source)
+
+	mr := requireMethod(t, result, "GetApps")
+	if !mr.Fields["Name"] {
+		t.Error("expected Name field from indexed range element")
 	}
 }
