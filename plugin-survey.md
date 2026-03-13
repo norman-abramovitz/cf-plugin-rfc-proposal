@@ -26,7 +26,13 @@ to understand how they use the current plugin interface. The findings inform the
 **Source of plugin list:** Active plugins were identified from
 https://plugins.cloudfoundry.org/ filtered to those with GitHub repository
 activity since 2022 and not archived, plus community plugins from the
-`cloudfoundry-community` and `rabobank` GitHub organizations.
+`cloudfoundry-community`, `rabobank`, and `ECSTeam` GitHub organizations.
+
+**Automated validation:** Manual survey findings were cross-validated with an
+AST-based Go source scanner (`cf-plugin-migrate`) that detects V2 domain method
+calls, `CliCommand`/`CliCommandWithoutTerminalOutput` usage, internal CLI package
+imports, and API endpoint string literals. Items marked with **†** in the matrices
+were discovered by the scanner and missed in the initial manual review.
 
 ---
 
@@ -34,37 +40,41 @@ activity since 2022 and not archived, plus community plugins from the
 
 ### Core Context Methods
 
-| Method | OCF Sched | Autoscaler | MTA | cf-java | cf-targets | Rabobank | upgrade-all | stack-auditor | log-cache | defaultenv | metric-reg | svc-inst-logs | spring-cloud | mysql-cli | swisscom | html5 | cf-lookup | list-svc |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| `AccessToken()` | Y | Y | Y | - | - | Y | Y | - | Y | Y | - | Y | Y | Y | - | Y | - | - |
-| `ApiEndpoint()` | Y | Y | Y | - | - | Y | Y | - | Y | Y | - | - | Y | Y | - | Y | - | - |
-| `IsSSLDisabled()` | - | Y | Y | - | - | Y | Y | - | Y | - | - | - | Y | Y | - | Y | - | - |
-| `IsLoggedIn()` | Y | Y | - | - | - | Y | Y | - | - | - | - | - | - | - | - | - | Y | Y |
-| `GetCurrentOrg()` | Y | - | Y | - | - | Y | - | - | Y | - | - | Y | Y | - | - | Y | - | - |
-| `GetCurrentSpace()` | Y | Y | Y | - | - | Y | - | Y | Y | Y | Y | Y | Y | Y | Y | Y | - | - |
-| `HasOrganization()` | - | - | - | - | - | Y | - | - | - | - | - | - | - | - | - | - | - | Y |
-| `HasSpace()` | - | Y | - | - | - | Y | - | - | - | - | - | - | - | - | - | - | - | Y |
-| `HasAPIEndpoint()` | Y | - | - | - | - | - | - | - | Y | - | - | - | - | - | - | - | Y | - |
-| `Username()` | Y | - | Y | - | - | Y | - | - | Y | - | - | Y | Y | - | Y | Y | - | - |
-| `ApiVersion()` | - | - | - | - | - | - | Y | - | - | - | - | - | - | - | - | - | - | - |
+| Method | top | OCF Sched | Autoscaler | MTA | cf-java | cf-targets | Rabobank | upgrade-all | stack-auditor | log-cache | defaultenv | metric-reg | svc-inst-logs | spring-cloud | mysql-cli | swisscom | html5 | cf-lookup | list-svc | svc-conn |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| `AccessToken()` | Y | Y | Y | Y | - | - | Y | Y | - | Y | Y | - | Y | Y | Y | - | Y | - | - | - |
+| `ApiEndpoint()` | Y | Y | Y | Y | - | - | Y | Y | - | Y | Y | - | - | Y | Y | - | Y | - | - | - |
+| `IsSSLDisabled()` | Y | - | Y | Y | - | - | Y | Y | - | Y | - | - | - | Y | Y | - | Y | - | - | - |
+| `IsLoggedIn()` | Y | Y | Y | - | - | - | Y | Y | - | - | - | - | - | - | - | - | - | Y | Y | - |
+| `GetCurrentOrg()` | - | Y | - | Y | - | - | Y | - | - | Y | - | - | Y | Y | - | - | Y | - | - | - |
+| `GetCurrentSpace()` | - | Y | Y | Y | - | - | Y | - | Y | Y | Y | Y | Y | Y | Y | Y | Y | - | - | - |
+| `HasOrganization()` | - | - | - | - | - | - | Y | - | - | - | - | - | - | - | - | - | - | - | Y | - |
+| `HasSpace()` | - | - | Y | - | - | - | Y | - | - | - | - | - | - | - | - | - | - | - | Y | - |
+| `HasAPIEndpoint()` | - | Y | - | - | - | - | - | - | - | Y | - | - | - | - | - | - | - | Y | - | - |
+| `Username()` | Y | Y | - | Y | - | - | Y | - | - | Y | - | - | Y | Y | - | Y | Y | - | - | - |
+| `DopplerEndpoint()` | Y | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - |
+| `ApiVersion()` | - | - | - | - | - | - | - | Y | - | - | - | - | - | - | - | - | - | - | - | - |
 
 ### Domain Model Methods (V2-coupled)
 
-| Method | OCF Sched | Autoscaler | MTA | cf-java | cf-targets | Rabobank | upgrade-all | stack-auditor | log-cache | defaultenv | metric-reg | svc-inst-logs | spring-cloud | mysql-cli | swisscom | html5 | cf-lookup | list-svc |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| `GetApp()` | Y | **Removed** | - | - | - | - | - | - | - | - | Y | - | - | - | - | - | - | Y |
-| `GetApps()` | Y | - | - | - | - | - | - | - | - | - | Y | - | Y | - | - | - | - | - |
-| `GetService()` | - | - | - | - | - | - | - | - | - | - | - | Y | Y | Y | Y | - | - | - |
-| `GetServices()` | - | - | - | - | - | - | - | - | - | - | Y | - | - | - | - | - | - | - |
-| `GetOrg()` | - | - | - | - | - | - | - | - | - | - | - | - | - | - | Y | - | - | - |
-| `GetOrgs()` | - | - | - | - | - | - | - | Y | - | - | - | - | - | - | - | - | - | - |
+| Method | top | OCF Sched | Autoscaler | MTA | cf-java | cf-targets | Rabobank | upgrade-all | stack-auditor | log-cache | defaultenv | metric-reg | svc-inst-logs | spring-cloud | mysql-cli | swisscom | html5 | cf-lookup | list-svc | svc-conn |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| `GetApp()` | - | Y | **Removed** | - | - | - | - | - | - | - | - | Y | - | - | - | - | - | - | Y | - |
+| `GetApps()` | Y | Y | - | - | - | - | - | - | - | - | - | Y | - | Y | - | - | - | - | - | - |
+| `GetService()` | - | - | - | - | - | - | - | - | - | - | - | - | Y | Y | Y | Y | - | - | - | Y |
+| `GetServices()` | - | - | - | - | - | - | - | - | - | - | - | Y | - | - | - | - | Y† | - | - | - |
+| `GetOrg()` | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | Y | Y† | - | - | - |
+| `GetOrgs()` | - | - | - | - | - | - | - | Y | - | - | - | - | - | - | - | - | - | - | - | - |
+| `GetSpace()` | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | Y† | Y† | - | - | - |
 
 ### CLI Command Delegation
 
-| Method | OCF Sched | Autoscaler | MTA | cf-java | cf-targets | Rabobank | upgrade-all | stack-auditor | log-cache | defaultenv | metric-reg | svc-inst-logs | spring-cloud | mysql-cli | swisscom | html5 | cf-lookup | list-svc |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| `CliCommand()` | - | - | help | **Removed** | - | - | - | - | - | - | - | - | - | Y | - | - | Y | Y |
-| `CliCmdWithoutTermOut()` | - | - | version | **Removed** | - | - | - | Y | Y | - | Y | Y | - | Y | Y | Y | - | Y |
+| Method | top | OCF Sched | Autoscaler | MTA | cf-java | cf-targets | Rabobank | upgrade-all | stack-auditor | log-cache | defaultenv | metric-reg | svc-inst-logs | spring-cloud | mysql-cli | swisscom | html5 | cf-lookup | list-svc | svc-conn |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| `CliCommand()` | - | - | - | help | **Removed** | - | - | - | - | - | - | - | - | - | Y | - | - | Y | Y | - |
+| `CliCmdWithoutTermOut()` | curl | - | - | version | **Removed** | - | - | - | Y | Y | - | Y | Y | - | Y | Y | Y | - | Y | Y |
+
+**†** Discovered by automated AST scanner — missed in initial manual survey.
 
 ### How Plugins Access Cloud Foundry Outside the Plugin Interface
 
@@ -99,6 +109,7 @@ manually into custom structs.
 
 | Plugin | CAPI Endpoints Accessed via `cf curl` |
 |---|---|
+| **top** | `/v2/apps/{guid}/stats`, `/v2/apps/{guid}/instances`, `/v2/spaces`, `/v2/organizations`, `/v2/routes`, `/v2/stacks`, `/v2/buildpacks`, `/v2/shared_domains`, `/v2/private_domains`, `/v2/quota_definitions`, `/v2/space_quota_definitions`, `/v3/isolation_segments` |
 | stack-auditor | `/v3/apps` (list/patch), `/v3/apps/{guid}/actions/start\|stop`, `/v2/spaces`, `/v2/buildpacks`, `/v2/stacks/{guid}` |
 | log-cache-cli | `/v3/apps?guids=...` (bulk resolve), `/v3/service_instances?guids=...` (bulk resolve) |
 | metric-registrar | `/v2/user_provided_service_instances`, `/v2/apps/{guid}` |
@@ -107,6 +118,7 @@ manually into custom structs.
 | swisscom appcloud | `/custom/*` (proprietary endpoints), `/v3/audit_events` |
 | html5-apps-repo (reads) | `/v3/service_offerings`, `/v3/service_plans`, `/v3/service_instances`, `/v3/service_credential_bindings`, `/v3/apps/{guid}/env` |
 | list-services | `/v3/service_bindings?app_guids=...` (paginated) |
+| cf-service-connect | `/v2/service_instances/{guid}/service_keys?q=name:{name}` (credential retrieval) |
 
 **Why `cf curl` instead of direct HTTP?** The CLI handles the `Authorization`
 header automatically, so plugins don't need to call `AccessToken()` or manage
@@ -122,6 +134,7 @@ requests to CAPI V3 or service-specific endpoints.
 
 | Plugin | Library / Approach | Endpoints |
 |---|---|---|
+| **top** | `github.com/cloudfoundry/noaa/v2` (Doppler consumer) | Doppler firehose (privileged) or per-app stream (non-privileged) via WebSocket |
 | upgrade-all-services | Custom `Requester` struct with `jsonry` for JSON | CAPI V3: `/v3/service_plans`, `/v3/service_instances` (GET/PATCH) |
 | MTA (MultiApps) | Raw `net/http` with manual URL construction | CAPI V3: `/v3/apps`, `/v3/service_instances`, `/v3/service_credential_bindings`; MTA deploy-service API |
 | html5-apps-repo (writes) | Raw `net/http` | CAPI V3: POST/DELETE service instances + service keys; UAA `/oauth/token` |
@@ -148,6 +161,7 @@ subcommands as workflow steps, relying on the CLI to handle the full lifecycle
 | stack-auditor | `stack --guid <name>` (GUID resolution) |
 | cf-lookup-route | `target -o <org> -s <space>` (optional re-targeting) |
 | MTA | `version` (CLI version detection), `help` (help display) |
+| cf-service-connect | `create-service-key`, `delete-service-key` (service key lifecycle) |
 | list-services | `help list-services` (help display) |
 
 #### Technique 5: `exec.Command("cf", ...)` — Bypass Plugin API Entirely
@@ -180,6 +194,7 @@ file directly.
 
 | Plugin | go-cfclient | `cf curl` | Direct HTTP | CLI delegation | `exec.Command` | File I/O |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|
+| **top** | - | **V2** | Y (Doppler firehose) | - | - | - |
 | OCF Scheduler | - | - | Y (`hype`) | - | - | - |
 | App Autoscaler | **V3** | - | Y (autoscaler API) | - | - | - |
 | MTA (MultiApps) | - | - | Y (CAPI V3 + deploy svc) | version, help | - | - |
@@ -198,12 +213,25 @@ file directly.
 | html5-apps-repo | - | **V3** (reads) | Y (writes + UAA) | - | - | - |
 | cf-lookup-route | **V3** | - | - | `target` (optional) | - | Y (read) |
 | list-services | - | **V3** | - | help | - | - |
+| cf-service-connect | - | **V2** | - | `create/delete-service-key` | - | - |
 
 ---
 
 ## Detailed Plugin Analyses
 
-### 1. OCF Scheduler (`cloudfoundry-community/ocf-scheduler-cf-plugin`)
+### 1. top (`ECSTeam/cloudfoundry-top-plugin`)
+
+- **Last updated:** Inactive (last commit 2024, last release 2020)
+- **Plugin API methods used (7):** `AccessToken`, `ApiEndpoint`, `IsSSLDisabled`, `IsLoggedIn`, `Username`, `DopplerEndpoint`, `GetApps`, `CliCommandWithoutTerminalOutput`
+- **CF interaction:** Heavy `CliCommandWithoutTerminalOutput("curl", ...)` for 16+ V2 CAPI endpoints. All metadata (apps, spaces, orgs, routes, stacks, buildpacks, quotas, domains) fetched via `curl` through the plugin API using a `CommonV2ResponseManager` with duck-typing interfaces and pagination support. Uses Doppler firehose (privileged) or per-app stream (non-privileged) via `cloudfoundry/noaa/v2` WebSocket library for real-time container metrics.
+- **V2 CAPI endpoints (16):** `/v2/apps`, `/v2/apps/{guid}/stats`, `/v2/apps/{guid}/instances`, `/v2/spaces`, `/v2/organizations`, `/v2/routes`, `/v2/routes/{id}/apps`, `/v2/stacks`, `/v2/buildpacks`, `/v2/shared_domains`, `/v2/private_domains`, `/v2/quota_definitions`, `/v2/space_quota_definitions`, `/v2/domains`, `/v2/info`, `/v2/events`
+- **V3 CAPI endpoints (1):** `/v3/isolation_segments`
+- **URL discovery:** Extracts base hostname from `ApiEndpoint()`, passes relative paths to `curl` via the plugin API.
+- **Token handling:** Custom `TokenRefresher` wraps `AccessToken()` for long-running Doppler connections. JWT decoded to check for `cloud_controller.admin` and `doppler.firehose` scopes.
+- **Dependencies:** `code.cloudfoundry.org/cli/v8`, `github.com/cloudfoundry/noaa/v2`, `github.com/cloudfoundry/sonde-go`, `github.com/gorilla/websocket`
+- **Pain points:** Extremely heavy V2 CAPI dependency (16 endpoints). The most V2-dependent plugin in the survey. Migration would require rewriting almost all metadata fetching to V3. `DopplerEndpoint()` is a plugin API method not used by any other surveyed plugin. Doppler/noaa are deprecated in favor of log-cache.
+
+### 2. OCF Scheduler (`cloudfoundry-community/ocf-scheduler-cf-plugin`)
 
 - **Last updated:** Active (2026)
 - **Plugin API methods used (7):** `IsLoggedIn`, `AccessToken`, `HasAPIEndpoint`, `ApiEndpoint`, `GetCurrentOrg`, `GetCurrentSpace`, `UserEmail`, `GetApp`, `GetApps`
@@ -212,7 +240,7 @@ file directly.
 - **Dependencies:** `code.cloudfoundry.org/cli`, `github.com/ess/hype` (HTTP client), `github.com/cloudfoundry-community/ocf-scheduler` (models)
 - **Notes:** Still uses `GetApp()`/`GetApps()` (V2-coupled methods). Uses `cf/terminal` for UI components.
 
-### 2. App Autoscaler (`cloudfoundry/app-autoscaler-cli-plugin`)
+### 3. App Autoscaler (`cloudfoundry/app-autoscaler-cli-plugin`)
 
 - **Last updated:** Active (2026)
 - **Plugin API methods used (6):** `ApiEndpoint`, `HasSpace`, `IsLoggedIn`, `AccessToken`, `GetCurrentSpace`, `IsSSLDisabled`
@@ -221,7 +249,7 @@ file directly.
 - **Dependencies:** `code.cloudfoundry.org/cli/v8`, `github.com/cloudfoundry/go-cfclient/v3` (alpha.19), `github.com/jessevdk/go-flags`
 - **Pain points:** `IsSSLDisabled()` was not correctly forwarded initially (required follow-up fix). Token refresh not supported during long operations since go-cfclient gets an empty refresh token.
 
-### 3. MultiApps / MTA (`cloudfoundry/multiapps-cli-plugin`)
+### 4. MultiApps / MTA (`cloudfoundry/multiapps-cli-plugin`)
 
 - **Last updated:** Active (2026)
 - **Plugin API methods used (8):** `AccessToken`, `GetCurrentOrg`, `GetCurrentSpace`, `Username`, `ApiEndpoint`, `IsSSLDisabled`, `CliCommandWithoutTerminalOutput` (version detection), `CliCommand` (help display)
@@ -230,7 +258,7 @@ file directly.
 - **Dependencies:** `code.cloudfoundry.org/cli/v8`, `code.cloudfoundry.org/jsonry`, `github.com/go-openapi/*` (Swagger), `github.com/golang-jwt/jwt/v5`
 - **Pain points:** Creates new `http.Transport` per request for CAPI V3 calls (inefficient). URL discovery via string manipulation of API endpoint.
 
-### 4. cf-java-plugin (`SAP/cf-cli-java-plugin`)
+### 5. cf-java-plugin (`SAP/cf-cli-java-plugin`)
 
 - **Last updated:** Active (2026)
 - **Plugin API methods used: NONE** (as of v4.0.2)
@@ -239,7 +267,7 @@ file directly.
 - **Dependencies:** `code.cloudfoundry.org/cli` (types only), `github.com/simonleung8/flags` (last updated 2017), `github.com/lithammer/fuzzysearch`
 - **Pain points:** `CliCommand()` unreliable for `cf ssh`. No stdout/stderr separation. Flag parsing library from 2017 is unmaintained.
 
-### 5. cf-targets-plugin (`cloudfoundry-community/cf-targets-plugin`)
+### 6. cf-targets-plugin (`cloudfoundry-community/cf-targets-plugin`)
 
 - **Last updated:** Active (2026, develop branch)
 - **Plugin API methods used: NONE**
@@ -247,7 +275,7 @@ file directly.
 - **Dependencies:** `code.cloudfoundry.org/cli` (for internal config packages, not plugin API)
 - **Pain points:** Massive dependency tree (Google Cloud SDK, AWS SDK, BOSH CLI, k8s client-go) pulled in transitively just for config file helpers. Plugin API gap: no way to save/restore CLI configuration, so it bypasses the interface.
 
-### 6. Rabobank cf-plugins (`rabobank/cf-plugins` + 4 consumers)
+### 7. Rabobank cf-plugins (`rabobank/cf-plugins` + 4 consumers)
 
 - **Last updated:** Active (2025-2026)
 - **Library methods used (16 pass-through):** All standard context methods plus `UserGuid`, `UserEmail`, `LoggregatorEndpoint`, `DopplerEndpoint`
@@ -257,7 +285,7 @@ file directly.
 - **Dependencies:** `code.cloudfoundry.org/cli v7.1.0+incompatible`, `github.com/cloudfoundry/go-cfclient/v3` (alpha.15)
 - **Pain points:** `GetApp()` reimplementation requires 11 V3 API calls. Token prefix stripping hardcodes 7-char assumption. Hardcoded user agent version.
 
-### 7. upgrade-all-services (`cloudfoundry/upgrade-all-services-cli-plugin`)
+### 8. upgrade-all-services (`cloudfoundry/upgrade-all-services-cli-plugin`)
 
 - **Last updated:** Active (2026)
 - **Plugin API methods used (5):** `IsLoggedIn`, `ApiVersion`, `AccessToken`, `ApiEndpoint`, `IsSSLDisabled`
@@ -266,7 +294,7 @@ file directly.
 - **Dependencies:** `code.cloudfoundry.org/cli/v8`, `code.cloudfoundry.org/jsonry`, `github.com/blang/semver/v4`, `github.com/hashicorp/go-version`
 - **Notes:** Does NOT use go-cfclient — rolls its own minimal HTTP requester. Defines its own narrow `CLIConnection` interface with only 5 methods.
 
-### 8. stack-auditor (`cloudfoundry/stack-auditor`)
+### 9. stack-auditor (`cloudfoundry/stack-auditor`)
 
 - **Last updated:** Active (2026)
 - **Plugin API methods used (3):** `CliCommandWithoutTerminalOutput`, `GetOrgs`, `GetCurrentSpace`
@@ -275,7 +303,7 @@ file directly.
 - **Dependencies:** `code.cloudfoundry.org/cli v7.1.0+incompatible`, `github.com/golang/mock`
 - **Pain points:** Mixed V2/V3 API usage. Stack deletion and buildpack listing still use V2 endpoints. Uses `exec.Command` for restage because `CliCommand` is problematic for long-running operations.
 
-### 9. log-cache-cli (`cloudfoundry/log-cache-cli`)
+### 10. log-cache-cli (`cloudfoundry/log-cache-cli`)
 
 - **Last updated:** Active (2026)
 - **Plugin API methods used (8):** `IsSSLDisabled`, `HasAPIEndpoint`, `ApiEndpoint`, `AccessToken`, `Username`, `GetCurrentOrg`, `GetCurrentSpace`, `CliCommandWithoutTerminalOutput`
@@ -283,7 +311,7 @@ file directly.
 - **URL discovery:** `strings.Replace(apiEndpoint, "api", "log-cache", 1)` — fragile hostname substitution.
 - **Dependencies:** `code.cloudfoundry.org/cli v7.1.0+incompatible`, `code.cloudfoundry.org/go-log-cache/v3`, `code.cloudfoundry.org/go-loggregator/v10`, `github.com/jessevdk/go-flags`
 
-### 10. DefaultEnv (`SAP/cf-cli-defaultenv-plugin`)
+### 11. DefaultEnv (`SAP/cf-cli-defaultenv-plugin`)
 
 - **Last updated:** Active (2026)
 - **Plugin API methods used (3):** `AccessToken`, `ApiEndpoint`, `GetCurrentSpace`
@@ -291,7 +319,7 @@ file directly.
 - **Dependencies:** `code.cloudfoundry.org/cli v7.1.0+incompatible`, `github.com/cloudfoundry/go-cfclient/v3` (alpha.17)
 - **Notes:** Single-file plugin. Clean example of the minimal "bootstrap-then-bypass" pattern.
 
-### 11. metric-registrar (`pivotal-cf/metric-registrar-cli`)
+### 12. metric-registrar (`pivotal-cf/metric-registrar-cli`)
 
 - **Last updated:** Active (2026)
 - **Plugin API methods used (5):** `CliCommandWithoutTerminalOutput`, `GetServices`, `GetApp`, `GetApps`, `GetCurrentSpace`
@@ -299,7 +327,7 @@ file directly.
 - **Dependencies:** `code.cloudfoundry.org/cli v7.1.0+incompatible`, `github.com/jessevdk/go-flags`
 - **Pain points:** Still heavily dependent on V2 API endpoints and V2-shaped plugin model methods. Would require significant migration effort.
 
-### 12. service-instance-logs (`pivotal-cf/service-instance-logs-cli-plugin`)
+### 13. service-instance-logs (`pivotal-cf/service-instance-logs-cli-plugin`)
 
 - **Last updated:** Active (2026)
 - **Plugin API methods used (6):** `AccessToken`, `GetService`, `CliCommandWithoutTerminalOutput`, `GetCurrentOrg`, `GetCurrentSpace`, `Username`
@@ -307,7 +335,7 @@ file directly.
 - **Dependencies:** `code.cloudfoundry.org/cli v7.1.0+incompatible`, `github.com/cloudfoundry/noaa` (log streaming), `github.com/cloudfoundry/sonde-go`
 - **Pain points:** Entirely dependent on V2 CAPI endpoints for service metadata traversal.
 
-### 13. spring-cloud-services (`pivotal-cf/spring-cloud-services-cli-plugin`)
+### 14. spring-cloud-services (`pivotal-cf/spring-cloud-services-cli-plugin`)
 
 - **Last updated:** Active (2026)
 - **Plugin API methods used (8):** `AccessToken`, `IsSSLDisabled`, `GetService`, `ApiEndpoint`, `GetCurrentOrg`, `GetCurrentSpace`, `Username`, `GetApps`
@@ -315,7 +343,7 @@ file directly.
 - **Dependencies:** `code.cloudfoundry.org/cli v7.1.0+incompatible`, `code.cloudfoundry.org/bytefmt`, `github.com/fatih/color`
 - **Notes:** Clean "plugin API for context, direct HTTP for operations" pattern. Uses `GetService()` and `GetApps()` (V2-coupled).
 
-### 14. mysql-cli-plugin (`pivotal-cf/mysql-cli-plugin`)
+### 15. mysql-cli-plugin (`pivotal-cf/mysql-cli-plugin`)
 
 - **Last updated:** Active (2026)
 - **Plugin API methods used (7):** `CliCommandWithoutTerminalOutput` (heavy), `CliCommand`, `GetCurrentSpace`, `GetService`, `AccessToken`, `ApiEndpoint`, `IsSSLDisabled`
@@ -323,23 +351,26 @@ file directly.
 - **Dependencies:** `code.cloudfoundry.org/cli v7.1.0+incompatible`, `github.com/cloudfoundry-community/go-cfclient/v2`, `github.com/go-sql-driver/mysql`, `github.com/jessevdk/go-flags`
 - **Pain points:** Uses both V2 (go-cfclient) and V3 (curl) CAPI endpoints. Retry logic with exponential backoff. Long-running task polling requires token refresh.
 
-### 15. Swisscom appcloud (`swisscom/appcloud-cf-cli-plugin`)
+### 16. Swisscom appcloud (`swisscom/appcloud-cf-cli-plugin`)
 
 - **Last updated:** Active (2026)
-- **Plugin API methods used (5):** `Username`, `GetService`, `GetCurrentSpace`, `GetOrg`, `CliCommandWithoutTerminalOutput`
-- **CF interaction:** Exclusively `CliCommandWithoutTerminalOutput("curl", ...)` for all API access. Endpoints are mostly custom Swisscom `/custom/*` extensions plus one standard `/v3/audit_events`. Uses V2-coupled model methods (`GetService`, `GetOrg`).
+- **Plugin API methods used (6):** `Username`, `GetService`, `GetCurrentSpace`, `GetOrg`, `GetSpace`†, `CliCommandWithoutTerminalOutput`
+- **CF interaction:** Exclusively `CliCommandWithoutTerminalOutput("curl", ...)` for all API access. Endpoints are mostly custom Swisscom `/custom/*` extensions plus `/v3/audit_events` and `/v3/organizations/{guid}/domains`. Uses V2-coupled model methods (`GetService` for Guid, `GetOrg` for Guid, `GetSpace`† for Guid).
 - **Dependencies:** `code.cloudfoundry.org/cli v7.1.0+incompatible`, `github.com/pkg/errors`
-- **Notes:** Uses CF CLI internal packages (`cf/terminal`, `cf/flags`, `cf/trace`) for rich terminal output.
+- **Internal CLI imports (26):** `cf/terminal` (22 files), `cf/flags` (1 file), `cf/trace` (1 file) — heaviest internal import footprint in the survey
+- **Notes:** Uses CF CLI internal packages for rich terminal output. The 22-file terminal import makes this one of the hardest plugins to migrate from internal CLI dependencies.
 
-### 16. html5-apps-repo (`SAP/cf-html5-apps-repo-cli-plugin`)
+### 17. html5-apps-repo (`SAP/cf-html5-apps-repo-cli-plugin`)
 
 - **Last updated:** 2025
-- **Plugin API methods used (7):** `Username`, `GetCurrentOrg`, `GetCurrentSpace`, `IsSSLDisabled`, `ApiEndpoint`, `AccessToken`, `CliCommandWithoutTerminalOutput`
-- **CF interaction:** Hybrid pattern. Read operations use `CliCommandWithoutTerminalOutput("curl", "/v3/...")`. Write operations (create/delete service keys/instances) use direct HTTP with `AccessToken()` and `ApiEndpoint()` because they need to read `Location` headers from async 202 responses. Also performs UAA `client_credentials` token exchange for html5-apps-repo service access.
+- **Plugin API methods used (10):** `Username`, `GetCurrentOrg`, `GetCurrentSpace`, `IsSSLDisabled`, `ApiEndpoint`, `AccessToken`, `CliCommandWithoutTerminalOutput`, `GetServices`†, `GetOrg`†, `GetSpace`†
+- **CF interaction:** Hybrid pattern. Read operations use `CliCommandWithoutTerminalOutput("curl", "/v3/...")`. Write operations (create/delete service keys/instances) use direct HTTP with `AccessToken()` and `ApiEndpoint()` because they need to read `Location` headers from async 202 responses. Also performs UAA `client_credentials` token exchange for html5-apps-repo service access. Uses V2-coupled domain methods `GetServices()` (for Name field), `GetOrg()` (Guid, Name), and `GetSpace()` (Guid, Name) — discovered by AST scanner, missed in manual survey.
+- **V3 CAPI endpoints (17):** `/v3/service_offerings`, `/v3/service_plans`, `/v3/service_instances`, `/v3/service_credential_bindings`, `/v3/apps`, `/v3/apps/{guid}/env` (read and write variants)
 - **Dependencies:** Vendored (no go.mod). Uses older `github.com/cloudfoundry/cli` import path.
+- **Internal CLI imports (8):** `cf/terminal` (6 files), `cf/i18n` (1 file) — all replaceable via `cf-plugin-helpers/cfui`
 - **Notes:** Most sophisticated pattern — needs direct HTTP for writes because `CliCommandWithoutTerminalOutput("curl", ...)` doesn't expose response headers.
 
-### 17. cf-lookup-route (`cloudfoundry/cf-lookup-route`)
+### 18. cf-lookup-route (`cloudfoundry/cf-lookup-route`)
 
 - **Last updated:** 2024
 - **Plugin API methods used (3):** `HasAPIEndpoint`, `IsLoggedIn`, `CliCommand` (optional re-targeting)
@@ -347,13 +378,22 @@ file directly.
 - **Dependencies:** `code.cloudfoundry.org/cli v7.1.0+incompatible`, `github.com/cloudfoundry/go-cfclient/v3` (alpha.9)
 - **Notes:** Bypasses plugin `CliConnection` for data access entirely. Reads `~/.cf/config.json` directly for go-cfclient initialization — similar to cf-targets-plugin's approach.
 
-### 18. list-services (`pavellom/list-services-plugin`)
+### 19. list-services (`pavellom/list-services-plugin`)
 
 - **Last updated:** 2025
 - **Plugin API methods used (6):** `IsLoggedIn`, `HasOrganization`, `HasSpace`, `GetApp`, `CliCommand` (help), `CliCommandWithoutTerminalOutput` (curl)
 - **CF interaction:** Uses `GetApp()` for app GUID resolution (V2-coupled), then `CliCommandWithoutTerminalOutput("curl", "/v3/service_bindings?app_guids=...")` for service binding lookup with manual pagination.
 - **Dependencies:** No `go.mod` (pre-modules). `code.cloudfoundry.org/cli/plugin` only.
 - **Notes:** Simple plugin. Still uses V2-coupled `GetApp()`. Pre-modules Go project.
+
+### 20. cf-service-connect (`cloud-gov/cf-service-connect`)
+
+- **Last updated:** Active (2026)
+- **Plugin API methods used (2):** `GetService`, `CliCommandWithoutTerminalOutput`
+- **CF interaction:** Uses `GetService()` to resolve service instance (Guid, ServiceOffering.Name, ServicePlan.Name — V2-coupled). Uses `CliCommandWithoutTerminalOutput` for service key lifecycle (`create-service-key`, `delete-service-key`) and `curl` to fetch service key credentials via V2 endpoint `/v2/service_instances/{guid}/service_keys`. Opens a local SSH tunnel to the service (database, Redis, etc.) and launches a client CLI tool (psql, mysql, mongo, redis-cli).
+- **V2 CAPI endpoints (1):** `/v2/service_instances/{guid}/service_keys?q=name:{name}`
+- **Dependencies:** `code.cloudfoundry.org/cli v7.1.0+incompatible`, `github.com/phayes/freeport`
+- **Pain points:** Depends on V2 service key endpoint. No context methods used at all — the plugin relies entirely on `GetService` and `CliCommandWithoutTerminalOutput` for all CF interaction. Migration to V3 would replace `GetService` with V3 service instances API and the V2 service keys endpoint with `/v3/service_credential_bindings`.
 
 ---
 
@@ -365,31 +405,33 @@ The following methods are used by nearly every plugin that uses the plugin API:
 
 | Method | Usage Rate | Notes |
 |---|---|---|
-| `AccessToken()` | 12/18 | Universal for plugins that make direct API calls |
-| `ApiEndpoint()` | 11/18 | Universal for URL construction and client initialization |
-| `GetCurrentSpace()` | 14/18 | The most widely used context method |
-| `GetCurrentOrg()` | 8/18 | Common but not universal (some plugins don't need org context) |
-| `Username()` | 9/18 | Primarily for display purposes ("as USERNAME...") |
-| `IsSSLDisabled()` | 8/18 | Required for TLS configuration when making direct HTTP calls |
+| `AccessToken()` | 13/20 | Universal for plugins that make direct API calls |
+| `ApiEndpoint()` | 12/20 | Universal for URL construction and client initialization |
+| `GetCurrentSpace()` | 14/20 | The most widely used context method |
+| `GetCurrentOrg()` | 8/20 | Common but not universal (some plugins don't need org context) |
+| `Username()` | 10/20 | Primarily for display purposes ("as USERNAME...") |
+| `IsSSLDisabled()` | 9/20 | Required for TLS configuration when making direct HTTP calls |
+| `IsLoggedIn()` | 7/20 | Guard check before proceeding |
 
 ### 2. Domain Methods Are Being Abandoned
 
 | Method | Still Used By | Status |
 |---|---|---|
 | `GetApp()` | OCF Scheduler, metric-registrar, list-services | Active, but Autoscaler **removed** it |
-| `GetApps()` | OCF Scheduler, metric-registrar, spring-cloud-services | Active |
-| `GetService()` | service-instance-logs, spring-cloud-services, mysql-cli, swisscom | Active but returns V2 models |
-| `GetServices()` | metric-registrar | Nearly abandoned |
-| `GetOrg()` | swisscom | Nearly abandoned |
+| `GetApps()` | top, OCF Scheduler, metric-registrar, spring-cloud-services | Active |
+| `GetService()` | service-instance-logs, spring-cloud-services, mysql-cli, swisscom, cf-service-connect | Active but returns V2 models |
+| `GetServices()` | metric-registrar, html5† | Less used than expected |
+| `GetOrg()` | swisscom, html5† | Low adoption |
 | `GetOrgs()` | stack-auditor | Nearly abandoned |
+| `GetSpace()` | swisscom†, html5† | Discovered by scanner — missed in manual survey |
 
 ### 3. `CliCommand` / `CliCommandWithoutTerminalOutput` Patterns
 
 Three distinct usage patterns exist:
 
-1. **CLI command delegation** (e.g., `"bind-service"`, `"restage"`, `"push"`): Used by mysql-cli, metric-registrar, stack-auditor, cf-lookup-route. These plugins orchestrate CF CLI commands as workflow steps.
+1. **CLI command delegation** (e.g., `"bind-service"`, `"restage"`, `"push"`): Used by mysql-cli, metric-registrar, stack-auditor, cf-lookup-route, cf-service-connect. These plugins orchestrate CF CLI commands as workflow steps.
 
-2. **`cf curl` for CAPI access** (e.g., `"curl"`, `"/v3/apps?..."`): Used by stack-auditor, log-cache, metric-registrar, html5, swisscom, list-services, service-instance-logs, mysql-cli. This is the most common pattern for accessing V3 CAPI endpoints without building a custom HTTP client.
+2. **`cf curl` for CAPI access** (e.g., `"curl"`, `"/v3/apps?..."`): Used by top, stack-auditor, log-cache, metric-registrar, html5, swisscom, list-services, service-instance-logs, mysql-cli. This is the most common pattern for accessing V2/V3 CAPI endpoints without building a custom HTTP client.
 
 3. **GUID resolution** (e.g., `"app"`, appName, `"--guid"`): Used by log-cache. A targeted pattern for resolving names to GUIDs.
 
@@ -420,12 +462,27 @@ This is fragile and assumes a specific URL naming convention.
 ### 7. V2 API Dependencies Remain
 
 Several actively maintained plugins still depend on V2 CAPI endpoints:
+- **top:** 16 V2 endpoints — the most V2-dependent plugin in the survey (`/v2/apps`, `/v2/spaces`, `/v2/organizations`, `/v2/routes`, `/v2/stacks`, `/v2/buildpacks`, `/v2/shared_domains`, `/v2/private_domains`, `/v2/quota_definitions`, etc.)
 - **stack-auditor:** `/v2/spaces`, `/v2/buildpacks`, `/v2/stacks/{guid}`
 - **metric-registrar:** `/v2/user_provided_service_instances`, `/v2/apps/{guid}`
 - **service-instance-logs:** V2 service plan/service chain traversal
 - **mysql-cli:** go-cfclient V2 for find-bindings workflow
+- **cf-service-connect:** `/v2/service_instances/{guid}/service_keys` for credential retrieval
 
 These will break when V2 is disabled and represent the highest migration risk.
+
+### 8. Internal CLI Package Imports are Widespread
+
+The AST scanner detected internal CLI package imports (`cf/terminal`, `cf/flags`, `cf/trace`, `cf/configuration`, etc.) across 11 of 20 plugins. These create tight coupling to CLI internals that are not part of the public plugin contract.
+
+| Import Pattern | Plugins Affected | Replacement |
+|---|---|---|
+| `cf/terminal` (UI, colors, tables) | MTA (14 files), swisscom (22 files), html5 (7 files), list-services, service-instance-logs, spring-cloud-services | `cf-plugin-helpers/cfui` |
+| `cf/trace` (logging) | autoscaler, swisscom, list-services | `cf-plugin-helpers/cftrace` |
+| `cf/flags` (flag parsing) | MTA, swisscom, service-instance-logs, spring-cloud-services | stdlib `flag` or `pflag` |
+| `cf/configuration` (config paths) | cf-targets, mysql-cli, autoscaler | `cf-plugin-helpers/cfconfig` |
+| `cf/i18n` (internationalization) | MTA, html5 | Transitive dep of `cf/terminal` — removing terminal eliminates it |
+| `util/ui`, `util/configv3` | mysql-cli | Replace `DisplayBoolPrompt()` with `fmt.Print` + `bufio.Scanner` |
 
 ---
 

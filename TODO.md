@@ -4,7 +4,9 @@
 
 ### Research & Analysis (Completed)
 
-- [x] Survey actively maintained CF CLI plugins (18 plugins analyzed — see [plugin-survey.md](plugin-survey.md))
+- [x] Survey actively maintained CF CLI plugins (19 active + 1 inactive = 20 plugins analyzed — see [plugin-survey.md](plugin-survey.md))
+- [x] Build AST-based scanner (`cf-plugin-migrate`) to validate manual survey — V2 method detection, CliCommand tracing, internal import detection, API endpoint discovery
+- [x] Run scanner across all 19 surveyed plugins, cross-validate with manual findings (discovered 4 missed V2 domain method usages: html5 GetOrg/GetSpace/GetServices, swisscom GetSpace)
 - [x] Document how plugins interact with CF outside the plugin interface (go-cfclient, cf curl, direct HTTP, exec bypass, file I/O)
 - [x] Analyze CF CLI plugin internals (`plugin/`, `plugin/models/`, `plugin/rpc/`) — see [cli-plugin-interface-todo.md](cli-plugin-interface-todo.md)
 - [x] Analyze plugin help system integration (`command/common/help_command.go`, `GetMetadata().Commands`)
@@ -123,8 +125,8 @@ Standalone replacement packages with matching function signatures so plugins mig
 
 ## Community Process
 
-- [ ] Post RFC draft to cloudfoundry/community as a PR
-- [ ] Mention @cloudfoundry/toc and relevant working groups
+- [x] Post RFC draft to cloudfoundry/community as a PR — [community#1452](https://github.com/cloudfoundry/community/pull/1452)
+- [x] Mention @cloudfoundry/toc and relevant working groups — App Runtime Interfaces (CLI project)
 - [ ] Present at CF community call
 - [ ] Collect feedback during public discussion period
 - [ ] Request Final Comment Period (FCP)
