@@ -265,7 +265,7 @@ The implementation introduces:
 | New dependencies added | go-cfclient in each plugin | None (ccv3 already in CLI) |
 | API call efficiency | Optimized per-plugin (only declared fields) | Fixed (all fields populated) |
 | Field completeness | Per-plugin: only used fields populated | Incomplete: empty GUIDs, missing quotas, hardcoded `IsAdmin: false` |
-| `GetApp` coverage | Full (generated per field group) | Skipped (left on legacy V2 path) |
+| `GetApp` coverage | Full (generated per field group) | Complex code |
 | CF_TRACE visibility | `cftrace.NewTracingTransport` for guest calls | Supported via `simpleRequestLogger` |
 | Legacy code removal | Enables removal of `cli_rpc_server.go` domain methods | Replaces V2 internals but preserves the RPC handler structure |
 | Wire format coupling | Temporary (until plugin SDK) | Permanent (`plugin_models.*` remains the contract) |
