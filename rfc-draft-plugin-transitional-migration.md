@@ -116,9 +116,33 @@ Plugin teams that have already migrated — including [App Autoscaler](https://g
 
 ### Relationship to a New Plugin Interface
 
-This RFC addresses the immediate V2 end-of-life risk using the existing plugin interface and works with CF CLI v8. A separate future RFC will propose a modernized plugin interface targeting v9 and later with a minimal stable contract, polyglot language support, backward compatibility, and improved help and versioning metadata.
+This RFC addresses the immediate V2 end-of-life risk using the existing plugin interface and works with CF CLI v8. CLI v7 is already deprecated and its use of CF API v2 for service-related commands means it will not function on foundations with v2 disabled, independent of plugin migration. This RFC therefore scopes to v8 and later.
 
-Note: CLI v7 is already deprecated and its use of CF API v2 for service-related commands means it will not function on foundations with v2 disabled, independent of plugin migration. This RFC therefore scopes to v8 and later.
+## Future Improvements
+
+This section outlines the broader plugin modernization direction that subsequent RFCs will address in detail. These are not part of this RFC's scope but provide context for the overall strategy.
+
+### V2 Domain Method Deprecation
+
+Once the guest-side migration path is established, the V2 domain methods on `plugin.CliConnection` (`GetApp`, `GetApps`, `GetService`, `GetServices`, `GetOrg`, `GetOrgs`, `GetSpaces`, `GetOrgUsers`, `GetSpaceUsers`) and the CLI passthrough methods (`CliCommand`, `CliCommandWithoutTerminalOutput`) SHOULD be formally deprecated in CLI v8 with runtime warnings pointing to this RFC's migration guidance. Removal would align with the RFC-0032 CAPI V2 removal timeline.
+
+### Modernized Plugin Interface (CLI v9)
+
+A future RFC will propose a minimal stable plugin contract for CLI v9 that formalizes the pattern the community has already converged on:
+
+- **Host as context provider only** — authentication, endpoint, and target context (the methods universally used today: `AccessToken`, `ApiEndpoint`, `GetCurrentOrg`, `GetCurrentSpace`, `IsSSLDisabled`, `Username`)
+- **No CF domain models in the contract** — plugins interact with CAPI V3 directly using their own clients
+- **Polyglot support** — a language-agnostic protocol (e.g., JSON-RPC 2.0) replacing the Go-specific gob/net-rpc transport, enabling plugins in Python, Java, and other languages
+- **Install-time metadata** — embedded markers replacing execution-time metadata discovery, eliminating the security concern of running untrusted binaries at install
+- **Improved versioning and help metadata** — SemVer-compliant version types, structured flag definitions, and richer help text fields aligned with the [CF CLI Help Guidelines](https://github.com/cloudfoundry/cli/wiki/CF-CLI-Help-Guidelines)
+
+### Plugin Repository Modernization
+
+A future RFC will address plugin repository improvements including:
+
+- **Compatibility metadata** — structured version constraints (CLI version, CAPI version, plugin interface version) in the repository registry
+- **Unmaintained plugin policy** — graduated response for plugins without recent activity (notification → warning → archival → removal)
+- **Security and infrastructure** — SHA-256 checksums (replacing SHA-1), ARM64/Apple Silicon platform support, binary health checking
 
 ## Plugin Repository Metadata and Maintenance
 

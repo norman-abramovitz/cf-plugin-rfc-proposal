@@ -25,9 +25,13 @@ RFC A (Strategy) ← references all three
 
 **RFC D** addresses plugin repository maintenance — compatibility metadata and unmaintained plugin policy. It can proceed independently of the other three.
 
+### Alternative: beyhan's "Future Improvements" Pattern
+
+@beyhan suggested (2026-03-20) that a dedicated overarching strategy RFC (RFC A) may not be needed. Instead, the first RFC (RFC B, PR #1452) could include a **Future Improvements** section that broadly outlines the big picture, with subsequent RFCs referencing it for context. This pattern has been used in past CFF RFCs. Under this approach, RFC A's content would be absorbed into RFC B's Future Improvements section, reducing the split to 3 RFCs (B, C, D). A "Future Improvements" section has been added to `rfc-draft-plugin-transitional-migration.md` to support this option.
+
 ### Submission Plan
 
-Each RFC will be submitted as a separate PR to `cloudfoundry/community`. RFC B already exists as PR #1452. RFCs A, C, and D will be new PRs referencing each other by PR number once submitted.
+Each RFC will be submitted as a separate PR to `cloudfoundry/community`. RFC B already exists as PR #1452. RFCs A (if kept separate), C, and D will be new PRs referencing each other by PR number once submitted.
 
 ---
 

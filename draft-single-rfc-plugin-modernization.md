@@ -656,4 +656,18 @@ Split this document at the Part 2/Part 3 boundary:
 - Cross-references between RFCs add complexity
 - Risk of RFC A being accepted without RFC B, leaving the long-term story incomplete
 
+### Option C: Split with "Future Improvements" Pattern (beyhan's suggestion)
+
+Use the migration RFC (PR #1452) as the first RFC, adding a **Future Improvements** section that outlines the big picture (deprecation direction, V9 interface, plugin repo). Subsequent RFCs for the V9 interface and plugin repo reference back to this section for context. No dedicated overarching strategy RFC needed.
+
+**Advantages:**
+- Follows established CFF RFC pattern used in past RFCs
+- First RFC (PR #1452) is already in review -- just needs the Future Improvements section added
+- Reduces the split to 3 RFCs instead of 4
+- The big picture is visible without a separate document
+
+**Disadvantages:**
+- Future Improvements section may invite scope creep in review
+- Less detailed strategic framing than a dedicated strategy RFC
+
 The working group SHOULD decide which approach best serves the community's review process.
