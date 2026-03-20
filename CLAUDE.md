@@ -16,6 +16,9 @@ This repository contains an RFC proposal to modernize the Cloud Foundry CLI plug
 | `plugin-survey.md` | Survey of 18 actively maintained CF CLI plugins — how they use the plugin interface, workarounds, and migration patterns. Includes Rabobank case study. |
 | `cli-plugin-interface-todo.md` | Detailed implementation plan for changes needed in the CF CLI codebase (`cloudfoundry/cli`). Organized by phases (1–6). |
 | `TODO.md` | High-level work item tracker — research, decisions, stakeholder review, reference implementation, community process. |
+| `plugin-repo-analysis.md` | Standalone analysis of plugin repository strengths, weaknesses, and ecosystem comparison (informs RFC D). |
+| `draft-single-rfc-plugin-modernization.md` | Single unified RFC draft covering all 4 parts of plugin modernization (for CLI WG meeting 2026-03-25). |
+| `draft-split-rfcs-plugin-modernization.md` | Split RFC drafts (A, B, C, D) covering all 4 parts as independent RFCs (for CLI WG meeting 2026-03-25). |
 | `README.md` | Repository introduction and document links. |
 
 ## Terminology
