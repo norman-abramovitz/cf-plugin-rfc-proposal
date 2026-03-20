@@ -27,6 +27,7 @@
 - [x] Add `Group` field to `FlagDefinition` for organized flag display
 - [x] Rename `PluginVersion.Build` → `Patch` for SemVer correctness; add `PreRelease`, `BuildMeta`, `String()`
 - [x] Research `CF_PLUGIN_METADATA:` marker survivability in self-extracting and compressed executables (UPX, makeself, AppImage, NSIS, 7-Zip SFX, etc.) — character safety confirmed for JSON in all formats
+- [x] Analyze host-side V3 rewrite POC ([cli#3741](https://github.com/cloudfoundry/cli/pull/3741)) — jcvrabo's proof-of-concept rewrites 9/10 domain methods in `cli_rpc_server.go` to use `v7action.Actor` + ccv3 instead of legacy commandregistry. ~800 lines changed, `GetApp` left on legacy path, 9 test cases removed without replacements, incomplete field mapping (empty GUIDs, missing quotas, hardcoded `IsAdmin: false`). Approaches are not mutually exclusive — host-side buys time, guest-side eliminates coupling. See [detailed RFC "Host-Side Alternative"](rfc-draft-plugin-transitional-migration-detailed.md#host-side-alternative-rewriting-cli_rpc_servergo-against-v3).
 
 ### Decisions Made
 

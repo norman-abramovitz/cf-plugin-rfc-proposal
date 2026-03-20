@@ -19,6 +19,7 @@ This repository contains an RFC proposal to modernize the Cloud Foundry CLI plug
 | `plugin-repo-analysis.md` | Standalone analysis of plugin repository strengths, weaknesses, and ecosystem comparison (informs RFC D). |
 | `draft-single-rfc-plugin-modernization.md` | Single unified RFC draft covering all 4 parts of plugin modernization (for CLI WG meeting 2026-03-25). |
 | `draft-split-rfcs-plugin-modernization.md` | Split RFC drafts (A, B, C, D) covering all 4 parts as independent RFCs (for CLI WG meeting 2026-03-25). |
+| `cf-summit-2025-plugin-talk-transcript.md` | Transcript of CF Summit 2025 talk "CF CLI Plugins — Current Status and Future" by Norman Abramovitz & Al Berez. |
 | `README.md` | Repository introduction and document links. |
 
 ## Terminology

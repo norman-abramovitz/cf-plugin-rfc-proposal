@@ -240,6 +240,47 @@ This means the CLI team can:
 
 The migration happens **without coordination** — each plugin developer migrates independently, and the CLI team removes host-side code when usage drops below their threshold.
 
+#### Host-Side Alternative: Rewriting cli_rpc_server.go Against V3
+
+An alternative approach rewrites the host's RPC handlers to call CAPI V3 internally while preserving the existing `plugin_models.*` wire format. This means plugins require zero changes — the host transparently switches from V2 to V3 backends. A proof-of-concept of this approach exists as [cloudfoundry/cli#3741](https://github.com/cloudfoundry/cli/pull/3741) (explicitly marked "DO NOT CONSIDER THIS PR FOR MERGING" — it is a discussion piece for [cli#3621](https://github.com/cloudfoundry/cli/issues/3621)).
+
+**What the POC does:**
+
+The POC rewrites 9 of 10 domain methods in `plugin/rpc/cli_rpc_server.go` to use `v7action.Actor` and `ccv3.Client` instead of the legacy `commandregistry` + V2 command runner pattern. It also rewrites `AccessToken` to use `v7action.RefreshAccessToken()` instead of the legacy `authenticationRepository`. `GetApp` is left on the legacy path because it requires coordinating 6+ V3 API calls to populate the full `GetAppModel`.
+
+The implementation introduces:
+
+- A **~120-line `configAdapter`** struct that bridges `coreconfig.Repository` (the legacy config interface) to the `configv3`-shaped interfaces required by `v7action.Actor`, `ccv3.Client`, `uaa.Client`, and `router.Client`. This adapter implements ~20 methods including `SkipSSLValidation`, `SetTargetInformation`, `CurrentUser`, and timeout accessors.
+- A **~60-line `simpleRequestLogger`** implementing the `RequestLoggerOutput` interface for CF_TRACE support.
+- A **~120-line `getClientsForActor`** function that constructs the CC v3, UAA, and routing clients with proper authentication wrappers.
+- **Model mapping functions** that convert `resources.*` and `v7action.*` types to `plugin_models.*` structs.
+
+**Comparison:**
+
+| Aspect | Guest-side (this RFC) | Host-side (PR #3741 POC) |
+|---|---|---|
+| Who changes code | Plugin developers | CLI team |
+| Plugin code changes | 1 line (`NewV2Compat(conn)`) | Zero |
+| CLI code changes | Zero | ~800 lines in `cli_rpc_server.go` |
+| New dependencies added | go-cfclient in each plugin | None (ccv3 already in CLI) |
+| API call efficiency | Optimized per-plugin (only declared fields) | Fixed (all fields populated) |
+| Field completeness | Per-plugin: only used fields populated | Incomplete: empty GUIDs, missing quotas, hardcoded `IsAdmin: false` |
+| `GetApp` coverage | Full (generated per field group) | Skipped (left on legacy V2 path) |
+| CF_TRACE visibility | `cftrace.NewTracingTransport` for guest calls | Supported via `simpleRequestLogger` |
+| Legacy code removal | Enables removal of `cli_rpc_server.go` domain methods | Replaces V2 internals but preserves the RPC handler structure |
+| Wire format coupling | Temporary (until plugin SDK) | Permanent (`plugin_models.*` remains the contract) |
+| Test coverage | Golden file tests for generated code | POC removes 9 existing test cases without replacements |
+
+**The approaches are not mutually exclusive.** The host-side rewrite prevents plugins from breaking when V2 is removed — buying time. The guest-side migration eliminates the coupling long-term — enabling the CLI team to eventually remove the domain method handlers entirely. A sequenced approach could use the host-side fix as a safety net while plugin teams migrate at their own pace:
+
+1. CLI team lands host-side V3 rewrite (plugins don't break)
+2. Plugin teams adopt guest-side migration (plugins decouple)
+3. CLI team removes host-side domain handlers (maintenance burden eliminated)
+
+**Why this RFC focuses on guest-side:** The host-side approach fixes the immediate V2 breakage but perpetuates the structural problem — the CLI remains responsible for populating V2-shaped domain models from V3 data, the `plugin_models.*` types remain part of the wire contract, and every new V3 concept (metadata labels, sidecars, rolling deployments) requires CLI team work to surface through the plugin interface. The guest-side approach eliminates the coupling entirely: each plugin team owns its data access, the CLI provides only stable context, and the CLI team's plugin maintenance burden drops to near zero.
+
+The `configAdapter` in the POC illustrates this cost concretely: 120 lines of glue bridging two config systems (`coreconfig.Repository` → `configv3` interfaces) that exist only because the RPC server lives in the legacy `cf/` package tree while v7action lives in the modern `actor/` tree. This adapter would need to track changes in both config systems indefinitely. The guest-side approach avoids this entirely — go-cfclient constructs its own client from three primitives (`AccessToken`, `ApiEndpoint`, `IsSSLDisabled`).
+
 **Build-time dependency remains.** The runtime decoupling described above does not eliminate the plugin's compile-time dependency on the CLI's Go packages. Plugins still import `code.cloudfoundry.org/cli/plugin` (for the `CliConnection` interface and `plugin.Start()`) and `code.cloudfoundry.org/cli/plugin/models` (for the V2 model types the generated wrappers return). These are the *intended* public plugin contract — not internal packages — but they still couple the guest's build to the host's repository.
 
 #### Achieving Full Build-Time Separation: Plugin SDK
@@ -2126,3 +2167,5 @@ These context models are populated by the host via RPC and pass through unchange
 - [capi-openapi-spec](https://github.com/cloudfoundry-community/capi-openapi-spec) — Community-maintained OpenAPI spec for CAPI V3
 - [cloud_controller_ng#2192](https://github.com/cloudfoundry/cloud_controller_ng/issues/2192) — Tracking issue for official CAPI OpenAPI spec
 - [cloudfoundry/cli#3621](https://github.com/cloudfoundry/cli/issues/3621) — Plugin interface tracking issue
+- [cloudfoundry/cli#3741](https://github.com/cloudfoundry/cli/pull/3741) — POC: host-side V3 rewrite of cli_rpc_server.go (discussion piece, not for merge)
+- [CF Summit 2025: CF CLI Plugins — Current Status and Future](https://www.youtube.com/watch?v=MyYxHkeHvKo) — Norman Abramovitz & Al Berez ([transcript](cf-summit-2025-plugin-talk-transcript.md))
