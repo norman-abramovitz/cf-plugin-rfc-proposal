@@ -269,7 +269,6 @@ The implementation introduces:
 | CF_TRACE visibility | `cftrace.NewTracingTransport` for guest calls | Supported via `simpleRequestLogger` |
 | Legacy code removal | Enables removal of `cli_rpc_server.go` domain methods | Replaces V2 internals but preserves the RPC handler structure |
 | Wire format coupling | Temporary (until plugin SDK) | Permanent (`plugin_models.*` remains the contract) |
-| Test coverage | Golden file tests for generated code | POC removes 9 existing test cases without replacements |
 
 **The approaches are not mutually exclusive.** The host-side rewrite prevents plugins from breaking when V2 is removed — buying time. The guest-side migration eliminates the coupling long-term — enabling the CLI team to eventually remove the domain method handlers entirely. A sequenced approach could use the host-side fix as a safety net while plugin teams migrate at their own pace:
 
